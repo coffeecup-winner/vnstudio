@@ -32,11 +32,31 @@ impl CellState for GameOfLifeState {
     const NUM_STATES: u8 = 2;
 }
 
+#[derive(Default)]
 pub struct GameOfLifeEvaluator;
 
 impl CellRuleEvaluator<8, GameOfLifeState> for GameOfLifeEvaluator {
-    fn evaluate(cell: GameOfLifeState, neighbors: &[GameOfLifeState; 8]) -> GameOfLifeState {
-        todo!()
+    fn evaluate(
+        &self,
+        state: GameOfLifeState,
+        neighbors: &[GameOfLifeState; 8],
+    ) -> GameOfLifeState {
+        let num_live_neighbors = neighbors
+            .iter()
+            .filter(|s| **s == GameOfLifeState::Live)
+            .count();
+        if state == GameOfLifeState::Live {
+            match num_live_neighbors {
+                2 | 3 => GameOfLifeState::Live,
+                _ => GameOfLifeState::Dead,
+            }
+        } else {
+            if num_live_neighbors == 3 {
+                GameOfLifeState::Live
+            } else {
+                GameOfLifeState::Dead
+            }
+        }
     }
 }
 

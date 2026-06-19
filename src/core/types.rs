@@ -1,9 +1,12 @@
 use std::fmt::Debug;
 
+use crate::core::rule_lut::RuleLUT;
+
 use super::storage::ChunkStorage;
 
+// IMPORTANT: Default state must be equal to 0u8.try_into().unwrap()
 pub trait CellState:
-    TryFrom<u8> + Into<u8> + Default + Clone + Copy + PartialEq + Eq + Debug
+    TryFrom<u8> + Into<u8> + Default + Clone + Copy + PartialEq + Eq + Debug + 'static
 {
     const NUM_STATES: u8;
 }
@@ -22,12 +25,12 @@ impl<const SIZE: usize, State: CellState> Default for Chunk<SIZE, State> {
 }
 
 pub trait CellRuleEvaluator<const NEIGHBORHOOD_SIZE: usize, State: CellState> {
-    fn evaluate(cell: State, neighbors: &[State; NEIGHBORHOOD_SIZE]) -> State;
+    fn evaluate(&self, state: State, neighbors: &[State; NEIGHBORHOOD_SIZE]) -> State;
 }
 
 pub trait CellularAutomataConfig<const NEIGHBORHOOD_SIZE: usize> {
     type State: CellState;
-    type Evaluator: CellRuleEvaluator<NEIGHBORHOOD_SIZE, Self::State>;
+    type Evaluator: CellRuleEvaluator<NEIGHBORHOOD_SIZE, Self::State> + Default + 'static;
 }
 
 pub struct CellularAutomaton<
@@ -36,6 +39,7 @@ pub struct CellularAutomaton<
     const CHUNK_SIZE: usize = 64,
 > {
     storage: ChunkStorage<CHUNK_SIZE, Config::State>,
+    evaluator: Box<dyn CellRuleEvaluator<NEIGHBORHOOD_SIZE, Config::State>>,
 }
 
 impl<
@@ -47,7 +51,14 @@ impl<
     pub fn new() -> Self {
         Self {
             storage: ChunkStorage::new(),
+            evaluator: Box::new(Config::Evaluator::default()),
         }
+    }
+
+    pub fn switch_to_lut(&mut self) {
+        self.evaluator = Box::new(RuleLUT::<NEIGHBORHOOD_SIZE, Config::State>::compute(
+            &*self.evaluator,
+        ));
     }
 }
 
