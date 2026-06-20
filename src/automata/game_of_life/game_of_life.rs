@@ -48,7 +48,7 @@ impl CellStateVisuals for GameOfLifeState {
     fn glyph_svg(self) -> Option<&'static str> {
         match self {
             GameOfLifeState::Dead => None,
-            GameOfLifeState::Live => Some(include_str!("glyphs/game_of_life/live.svg")),
+            GameOfLifeState::Live => Some(include_str!("glyphs/live.svg")),
         }
     }
 }
