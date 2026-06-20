@@ -143,15 +143,23 @@ impl GlyphPrimitive {
                 fill,
                 stroke,
             } => {
-                let rect = Rect::from_min_max(map_point(rect, *min), map_point(rect, *max));
+                let mapped_rect = Rect::from_min_max(map_point(rect, *min), map_point(rect, *max));
                 if let Some(fill) = fill {
-                    painter.rect_filled(rect, 0.0, *fill);
+                    painter.rect_filled(mapped_rect, 0.0, *fill);
                 }
                 if let Some(stroke) = stroke {
-                    painter.line_segment([rect.left_top(), rect.right_top()], *stroke);
-                    painter.line_segment([rect.right_top(), rect.right_bottom()], *stroke);
-                    painter.line_segment([rect.right_bottom(), rect.left_bottom()], *stroke);
-                    painter.line_segment([rect.left_bottom(), rect.left_top()], *stroke);
+                    let stroke = scale_stroke(rect, *stroke);
+                    painter.line_segment([mapped_rect.left_top(), mapped_rect.right_top()], stroke);
+                    painter.line_segment(
+                        [mapped_rect.right_top(), mapped_rect.right_bottom()],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [mapped_rect.right_bottom(), mapped_rect.left_bottom()],
+                        stroke,
+                    );
+                    painter
+                        .line_segment([mapped_rect.left_bottom(), mapped_rect.left_top()], stroke);
                 }
             }
             GlyphPrimitive::Circle {
@@ -166,11 +174,14 @@ impl GlyphPrimitive {
                     painter.circle_filled(center, radius, *fill);
                 }
                 if let Some(stroke) = stroke {
-                    painter.circle_stroke(center, radius, *stroke);
+                    painter.circle_stroke(center, radius, scale_stroke(rect, *stroke));
                 }
             }
             GlyphPrimitive::Line { from, to, stroke } => {
-                painter.line_segment([map_point(rect, *from), map_point(rect, *to)], *stroke);
+                painter.line_segment(
+                    [map_point(rect, *from), map_point(rect, *to)],
+                    scale_stroke(rect, *stroke),
+                );
             }
             GlyphPrimitive::Polygon {
                 points,
@@ -206,6 +217,7 @@ fn paint_points(
     }
 
     let mapped: Vec<Pos2> = points.iter().map(|point| map_point(rect, *point)).collect();
+    let stroke = stroke.map(|stroke| scale_stroke(rect, stroke));
     if let Some(fill) = fill
         && closed
         && points.len() >= 3
@@ -233,6 +245,10 @@ fn map_point(rect: Rect, point: [f32; 2]) -> Pos2 {
         rect.left() + point[0] * rect.width(),
         rect.top() + point[1] * rect.height(),
     )
+}
+
+fn scale_stroke(rect: Rect, stroke: Stroke) -> Stroke {
+    Stroke::new(stroke.width * rect.width().min(rect.height()), stroke.color)
 }
 
 fn parse_view_box(value: &str) -> Result<ViewBox, String> {
@@ -432,6 +448,8 @@ fn parse_color(value: &str) -> Option<Color32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{automata::von_neumann::VonNeumannState, core::types::CellStateVisuals};
+    use strum::EnumCount;
 
     #[test]
     fn parses_simple_circle() {
@@ -441,5 +459,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(glyph.primitives.len(), 1);
+    }
+
+    #[test]
+    fn parses_all_von_neumann_glyphs() {
+        for value in 1..VonNeumannState::COUNT as u8 {
+            let state = VonNeumannState::try_from(value).unwrap();
+            let svg = state
+                .glyph_svg()
+                .unwrap_or_else(|| panic!("missing glyph for {state:?}"));
+            SvgGlyph::parse(svg)
+                .unwrap_or_else(|error| panic!("failed to parse glyph for {state:?}: {error}"));
+            assert!(
+                state.pixel_color().is_some(),
+                "missing pixel color for {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scales_svg_strokes_to_cell_size() {
+        let stroke = scale_stroke(
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(20.0, 30.0)),
+            Stroke::new(0.05, Color32::BLACK),
+        );
+
+        assert_eq!(stroke.width, 1.0);
     }
 }
