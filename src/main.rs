@@ -1,7 +1,4 @@
-use crate::{
-    automata::game_of_life::{GameOfLife, GameOfLifeState},
-    core::evaluator::BasicEvaluator,
-};
+use crate::automata::game_of_life::{GameOfLife, GameOfLifeState};
 
 mod automata;
 mod core;
@@ -24,6 +21,6 @@ fn main() {
             println!();
         }
         println!();
-        automaton.evaluate_next::<BasicEvaluator>();
+        automaton.evaluate_next();
     }
 }

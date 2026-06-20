@@ -61,7 +61,7 @@ pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 
 pub struct CellStateChange<State: CellState> {
     pub chunk_coords: (isize, isize),
-    pub cell_index_in_chunk: usize,
+    pub cell_index_in_chunk: (usize, usize),
     #[allow(unused)]
     pub old_state: State,
     pub new_state: State,
@@ -113,9 +113,7 @@ where
         ));
     }
 
-    pub fn evaluate_next<Evaluator: CellGridEvaluator<Config::State, Config::Neighborhood>>(
-        &mut self,
-    ) {
+    pub fn evaluate_next(&mut self) {
         let changes = self
             .grid_evaluator
             .evaluate_all(&self.storage, &*self.rule_evaluator);

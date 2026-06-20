@@ -21,6 +21,11 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
         let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
 
         let size = 1 << (num_bits_per_state as usize * (Neighborhood::NUM_CELLS as usize + 1));
+
+        assert!(
+            size < 64 * 1024 * 1024,
+            "LUT size is too large for this automaton, investigate"
+        );
         let mut lut = vec![State::default(); size];
 
         for (i, result) in lut.iter_mut().enumerate() {

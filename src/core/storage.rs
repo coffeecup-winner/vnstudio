@@ -166,10 +166,25 @@ impl<State: CellState> ChunkStorage<State> {
         }
     }
 
-    pub fn set_state(&mut self, x: isize, y: isize, new_state: State) {
-        let (chunk_x, cell_x) = Self::split_cell_coord(x);
-        let (chunk_y, cell_y) = Self::split_cell_coord(y);
-        let chunk = self.chunks.entry((chunk_x, chunk_y)).or_default();
+    fn set_state_core(
+        &mut self,
+        chunk_x: isize,
+        chunk_y: isize,
+        cell_x: usize,
+        cell_y: usize,
+        new_state: State,
+    ) {
+        let chunk = match self.chunks.entry((chunk_x, chunk_y)) {
+            hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            hash_map::Entry::Vacant(entry) => {
+                // Don't allocate a new chunk if we're setting the cell to default state
+                if new_state == State::default() {
+                    return;
+                }
+
+                entry.insert(Chunk::default())
+            }
+        };
         chunk.set_state(cell_x, cell_y, new_state);
 
         // Set the external borders in neighboring chunks
@@ -207,10 +222,21 @@ impl<State: CellState> ChunkStorage<State> {
         }
     }
 
+    pub fn set_state(&mut self, x: isize, y: isize, new_state: State) {
+        let (chunk_x, cell_x) = Self::split_cell_coord(x);
+        let (chunk_y, cell_y) = Self::split_cell_coord(y);
+        self.set_state_core(chunk_x, chunk_y, cell_x, cell_y, new_state);
+    }
+
     pub fn apply_changes(&mut self, changes: &[CellStateChange<State>]) {
         for change in changes {
-            let chunk = self.chunks.get_mut(&change.chunk_coords).unwrap();
-            chunk.cells[change.cell_index_in_chunk] = change.new_state;
+            self.set_state_core(
+                change.chunk_coords.0,
+                change.chunk_coords.1,
+                change.cell_index_in_chunk.0,
+                change.cell_index_in_chunk.1,
+                change.new_state,
+            );
         }
     }
 }
