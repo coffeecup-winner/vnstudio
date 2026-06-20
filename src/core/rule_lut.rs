@@ -17,10 +17,16 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> CellRuleEvaluator<
 
 impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Neighborhood> {
     pub fn compute(evaluator: &dyn CellRuleEvaluator<State, Neighborhood>) -> Self {
-        let num_states = State::NUM_STATES;
-        let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
+        let num_states = State::COUNT;
+        let num_bits_per_state = usize::BITS - (num_states - 1).leading_zeros();
 
-        let size = 1 << (num_bits_per_state as usize * (Neighborhood::NUM_CELLS as usize + 1));
+        let total_num_bits = num_bits_per_state as usize * (Neighborhood::NUM_CELLS as usize + 1);
+        assert!(
+            total_num_bits <= usize::BITS as usize,
+            "The automaton rules are too large to be encoded in a LUT"
+        );
+
+        let size = 1 << total_num_bits;
 
         assert!(
             size < 64 * 1024 * 1024,
@@ -42,8 +48,8 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
 
     fn to_index(state: State, neighbors: &Neighborhood) -> usize {
         // If these are not made const by the compiler, it will be slow
-        let num_states = State::NUM_STATES;
-        let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
+        let num_states = State::COUNT;
+        let num_bits_per_state = usize::BITS - (num_states - 1).leading_zeros();
 
         let mut index = Into::<u8>::into(state) as usize;
         for s in neighbors.neighbors() {
@@ -56,8 +62,8 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
 
     fn from_index(mut index: usize) -> Option<(State, Neighborhood)> {
         // If these are not made const by the compiler, it will be slow
-        let num_states = State::NUM_STATES;
-        let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
+        let num_states = State::COUNT;
+        let num_bits_per_state = usize::BITS - (num_states - 1).leading_zeros();
 
         let mut neighbors = Neighborhood::default();
         for i in (0..Neighborhood::NUM_CELLS as usize).rev() {

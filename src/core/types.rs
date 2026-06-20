@@ -1,17 +1,41 @@
 use std::fmt::{Debug, Display};
 
 use crate::core::evaluator::BasicEvaluator;
+use strum::EnumCount;
 
 use super::{
     rule_lut::RuleLUT,
     storage::{Chunk, ChunkStorage, FillNeighborhood},
 };
 
-// IMPORTANT: Default state must be equal to 0u8.try_into().unwrap()
 pub trait CellState:
-    TryFrom<u8> + Into<u8> + Default + Clone + Copy + PartialEq + Eq + Debug + Display + 'static
+    TryFrom<u8>
+    + Into<u8>
+    + Default
+    + Clone
+    + Copy
+    + PartialEq
+    + Eq
+    + Debug
+    + Display
+    + EnumCount
+    + 'static
 {
-    const NUM_STATES: u8;
+}
+
+impl<T> CellState for T where
+    T: TryFrom<u8>
+        + Into<u8>
+        + Default
+        + Clone
+        + Copy
+        + PartialEq
+        + Eq
+        + Debug
+        + Display
+        + EnumCount
+        + 'static
+{
 }
 
 pub trait CellStateVisuals: CellState {

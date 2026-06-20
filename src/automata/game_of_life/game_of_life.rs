@@ -1,33 +1,17 @@
 use std::fmt::Display;
 
 use crate::core::types::*;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+use strum::EnumCount;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive, EnumCount,
+)]
+#[repr(u8)]
 pub enum GameOfLifeState {
     #[default]
-    Dead,
-    Live,
-}
-
-impl TryFrom<u8> for GameOfLifeState {
-    type Error = String;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        Ok(match value {
-            0 => GameOfLifeState::Dead,
-            1 => GameOfLifeState::Live,
-            _ => return Err("Wrong cell state".to_string()),
-        })
-    }
-}
-
-impl From<GameOfLifeState> for u8 {
-    fn from(value: GameOfLifeState) -> Self {
-        match value {
-            GameOfLifeState::Dead => 0,
-            GameOfLifeState::Live => 1,
-        }
-    }
+    Dead = 0,
+    Live = 1,
 }
 
 impl Display for GameOfLifeState {
@@ -38,10 +22,6 @@ impl Display for GameOfLifeState {
         };
         f.write_str(char)
     }
-}
-
-impl CellState for GameOfLifeState {
-    const NUM_STATES: u8 = 2;
 }
 
 impl CellStateVisuals for GameOfLifeState {
