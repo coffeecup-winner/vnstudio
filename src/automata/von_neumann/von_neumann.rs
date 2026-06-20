@@ -542,6 +542,7 @@ impl CellRuleEvaluator<VonNeumannState, VonNeumannNeighborhood<VonNeumannState>>
 pub struct VonNeumannConfig;
 
 impl CellularAutomataConfig for VonNeumannConfig {
+    const NAME: &'static str = "Von Neumann";
     type State = VonNeumannState;
     type Evaluator = VonNeumannEvaluator;
     type Neighborhood = VonNeumannNeighborhood<VonNeumannState>;

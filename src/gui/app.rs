@@ -75,7 +75,6 @@ impl SimulationSpeed {
 impl VnStudioApp {
     pub fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
         let mut automaton = GameOfLife::new();
-        automaton.switch_to_lut();
         seed_game_of_life(&mut automaton);
 
         Self {

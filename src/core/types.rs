@@ -131,6 +131,7 @@ pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 }
 
 pub trait CellularAutomataConfig {
+    const NAME: &'static str;
     type State: CellState;
     type Neighborhood: CellNeighborhood<Self::State>;
     type Evaluator: CellRuleEvaluator<Self::State, Self::Neighborhood> + Default + 'static;
@@ -147,11 +148,13 @@ where
     Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
 {
     pub fn new() -> Self {
-        Self {
+        let mut automaton = Self {
             storage: ChunkStorage::new(),
             rule_evaluator: Box::new(Config::Evaluator::default()),
             grid_evaluator: Box::new(ParallelEvaluator),
-        }
+        };
+        automaton.switch_to_lut();
+        automaton
     }
 
     #[allow(dead_code)]
@@ -177,9 +180,16 @@ where
     }
 
     pub fn switch_to_lut(&mut self) {
+        let start = std::time::Instant::now();
         self.rule_evaluator = Box::new(RuleLUT::<Config::State, Config::Neighborhood>::compute(
             &*self.rule_evaluator,
         ));
+        let end = std::time::Instant::now();
+        println!(
+            "LUT building for {} took {}ms",
+            Config::NAME,
+            (end - start).as_millis()
+        );
     }
 
     pub fn evaluate_next(&mut self) {

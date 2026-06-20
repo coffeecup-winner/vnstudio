@@ -74,6 +74,7 @@ impl CellRuleEvaluator<GameOfLifeState, MooreNeighborhood<GameOfLifeState>>
 pub struct GameOfLifeConfig;
 
 impl CellularAutomataConfig for GameOfLifeConfig {
+    const NAME: &'static str = "Game of Life";
     type State = GameOfLifeState;
     type Evaluator = GameOfLifeEvaluator;
     type Neighborhood = MooreNeighborhood<GameOfLifeState>;
