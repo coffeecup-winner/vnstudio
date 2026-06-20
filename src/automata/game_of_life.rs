@@ -44,6 +44,15 @@ impl CellState for GameOfLifeState {
     const NUM_STATES: u8 = 2;
 }
 
+impl CellStateVisuals for GameOfLifeState {
+    fn glyph_svg(self) -> Option<&'static str> {
+        match self {
+            GameOfLifeState::Dead => None,
+            GameOfLifeState::Live => Some(include_str!("glyphs/game_of_life/live.svg")),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct GameOfLifeEvaluator;
 

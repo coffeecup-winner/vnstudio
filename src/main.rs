@@ -1,26 +1,18 @@
-use crate::automata::game_of_life::{GameOfLife, GameOfLifeState};
-
 mod automata;
 mod core;
+mod gui;
 
-fn main() {
-    let mut automaton = GameOfLife::new();
-    automaton.switch_to_lut();
-    automaton.set_state(1, 0, GameOfLifeState::Live);
-    automaton.set_state(2, 1, GameOfLifeState::Live);
-    automaton.set_state(0, 2, GameOfLifeState::Live);
-    automaton.set_state(1, 2, GameOfLifeState::Live);
-    automaton.set_state(2, 2, GameOfLifeState::Live);
+use gui::app::VnStudioApp;
 
-    for iteration in 0..10 {
-        println!("Iteration {}:", iteration);
-        for y in -5..15 {
-            for x in -5..15 {
-                print!("{}", automaton.get_state(x, y));
-            }
-            println!();
-        }
-        println!();
-        automaton.evaluate_next();
-    }
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "VNStudio",
+        options,
+        Box::new(|creation_context| Ok(Box::new(VnStudioApp::new(creation_context)))),
+    )
 }

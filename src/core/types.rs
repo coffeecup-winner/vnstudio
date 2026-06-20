@@ -14,6 +14,10 @@ pub trait CellState:
     const NUM_STATES: u8;
 }
 
+pub trait CellStateVisuals: CellState {
+    fn glyph_svg(self) -> Option<&'static str>;
+}
+
 pub trait CellNeighborhood<State: CellState>: Default + Clone + Debug + 'static {
     const NUM_CELLS: u8;
 
