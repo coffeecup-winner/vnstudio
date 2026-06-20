@@ -90,13 +90,93 @@ impl Display for VonNeumannState {
 
 impl CellStateVisuals for VonNeumannState {
     fn glyph_svg(self) -> Option<&'static str> {
-        // TODO
-        None
+        match self {
+            Self::Ground => None,
+            Self::Sensitized => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized0 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized00 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized000 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized01 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized1 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized10 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Sensitized11 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Confluent00 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Confluent01 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Confluent10 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::Confluent11 => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionExcitedUp => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionExcitedDown => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionExcitedLeft => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionExcitedRight => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionQuiescentUp => Some(include_str!("../game_of_life/glyphs/live.svg")),
+            Self::TransmissionQuiescentDown => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::TransmissionQuiescentLeft => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::TransmissionQuiescentRight => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionExcitedUp => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionExcitedDown => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionExcitedLeft => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionExcitedRight => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionQuiescentUp => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionQuiescentDown => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionQuiescentLeft => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+            Self::SpecialTransmissionQuiescentRight => {
+                Some(include_str!("../game_of_life/glyphs/live.svg"))
+            }
+        }
     }
 
     fn pixel_color(self) -> Option<[u8; 3]> {
-        // TODO
-        None
+        match self {
+            Self::Ground => None,
+            Self::Sensitized => Some([32, 33, 36]),
+            Self::Sensitized0 => Some([32, 33, 36]),
+            Self::Sensitized00 => Some([32, 33, 36]),
+            Self::Sensitized000 => Some([32, 33, 36]),
+            Self::Sensitized01 => Some([32, 33, 36]),
+            Self::Sensitized1 => Some([32, 33, 36]),
+            Self::Sensitized10 => Some([32, 33, 36]),
+            Self::Sensitized11 => Some([32, 33, 36]),
+            Self::Confluent00 => Some([32, 33, 36]),
+            Self::Confluent01 => Some([32, 33, 36]),
+            Self::Confluent10 => Some([32, 33, 36]),
+            Self::Confluent11 => Some([32, 33, 36]),
+            Self::TransmissionExcitedUp => Some([32, 33, 36]),
+            Self::TransmissionExcitedDown => Some([32, 33, 36]),
+            Self::TransmissionExcitedLeft => Some([32, 33, 36]),
+            Self::TransmissionExcitedRight => Some([32, 33, 36]),
+            Self::TransmissionQuiescentUp => Some([32, 33, 36]),
+            Self::TransmissionQuiescentDown => Some([32, 33, 36]),
+            Self::TransmissionQuiescentLeft => Some([32, 33, 36]),
+            Self::TransmissionQuiescentRight => Some([32, 33, 36]),
+            Self::SpecialTransmissionExcitedUp => Some([32, 33, 36]),
+            Self::SpecialTransmissionExcitedDown => Some([32, 33, 36]),
+            Self::SpecialTransmissionExcitedLeft => Some([32, 33, 36]),
+            Self::SpecialTransmissionExcitedRight => Some([32, 33, 36]),
+            Self::SpecialTransmissionQuiescentUp => Some([32, 33, 36]),
+            Self::SpecialTransmissionQuiescentDown => Some([32, 33, 36]),
+            Self::SpecialTransmissionQuiescentLeft => Some([32, 33, 36]),
+            Self::SpecialTransmissionQuiescentRight => Some([32, 33, 36]),
+        }
     }
 }
 
