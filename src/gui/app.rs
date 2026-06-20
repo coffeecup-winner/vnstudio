@@ -41,7 +41,7 @@ pub struct VnStudioApp {
     last_update_time: Option<f64>,
     ups_window_start: f64,
     updates_this_window: u32,
-    title_shows_realtime_ups: bool,
+    last_title: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,7 +94,7 @@ impl VnStudioApp {
             last_update_time: None,
             ups_window_start: 0.0,
             updates_this_window: 0,
-            title_shows_realtime_ups: false,
+            last_title: None,
         }
     }
 
@@ -126,6 +126,7 @@ impl VnStudioApp {
 
                     if ui.button("Step").clicked() {
                         self.step_simulation();
+                        self.publish_title(ui.ctx(), None);
                         if self.is_running && self.speed == SimulationSpeed::Realtime {
                             self.updates_this_window += 1;
                         }
@@ -214,17 +215,25 @@ impl VnStudioApp {
             if now - self.ups_window_start >= 1.0 {
                 let elapsed = (now - self.ups_window_start).max(1.0);
                 let ups = (self.updates_this_window as f64 / elapsed).round() as u32;
-                let chunks = self.automaton.chunk_count();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{BASE_TITLE} - Realtime: {ups} UPS - {chunks} chunks"
-                )));
+                self.publish_title(ctx, Some(ups));
                 self.ups_window_start = now;
                 self.updates_this_window = 0;
-                self.title_shows_realtime_ups = true;
             }
-        } else if self.title_shows_realtime_ups {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(BASE_TITLE.to_string()));
-            self.title_shows_realtime_ups = false;
+        } else {
+            self.publish_title(ctx, None);
+        }
+    }
+
+    fn publish_title(&mut self, ctx: &Context, ups: Option<u32>) {
+        let ups = ups.map_or_else(|| "N/A".to_string(), |ups| ups.to_string());
+        let iterations = self.simulation_generation;
+        let chunks = self.automaton.chunk_count();
+        let title =
+            format!("{BASE_TITLE} - UPS: {ups} - Iteration: {iterations} - Chunks: {chunks}");
+
+        if self.last_title.as_deref() != Some(&title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = Some(title);
         }
     }
 
