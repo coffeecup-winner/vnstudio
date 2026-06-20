@@ -8,9 +8,9 @@ use eframe::egui::{
     TextureOptions, Ui, Vec2,
 };
 
-use crate::{
-    automata::game_of_life::{GameOfLife, GameOfLifeState},
-    core::types::CellStateVisuals,
+use crate::core::{
+    storage::{Chunk, FillNeighborhood},
+    types::{CellStateVisuals, CellularAutomataConfig, CellularAutomaton},
 };
 
 use super::svg_glyph::SvgGlyph;
@@ -25,8 +25,8 @@ const REALTIME_FRAME_BUDGET: Duration = Duration::from_millis(12);
 const REPAINT_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const BASE_TITLE: &str = "VNStudio";
 
-pub struct VnStudioApp {
-    automaton: GameOfLife,
+pub struct VnStudioApp<Config: CellularAutomataConfig> {
+    automaton: CellularAutomaton<Config>,
     zoom: f32,
     pan: Vec2,
     glyphs: HashMap<u8, SvgGlyph>,
@@ -72,11 +72,14 @@ impl SimulationSpeed {
     }
 }
 
-impl VnStudioApp {
-    pub fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
-        let mut automaton = GameOfLife::new();
-        seed_game_of_life(&mut automaton);
-
+impl<Config: CellularAutomataConfig> VnStudioApp<Config>
+where
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
+{
+    pub fn new(
+        _creation_context: &eframe::CreationContext<'_>,
+        automaton: CellularAutomaton<Config>,
+    ) -> Self {
         Self {
             automaton,
             zoom: INITIAL_CELL_SIZE,
@@ -352,8 +355,8 @@ impl VnStudioApp {
         self.pan = snapped_origin - rect.center();
     }
 
-    fn glyph_for(glyphs: &mut HashMap<u8, SvgGlyph>, state: GameOfLifeState) -> Option<&SvgGlyph> {
-        let key = u8::from(state);
+    fn glyph_for(glyphs: &mut HashMap<u8, SvgGlyph>, state: Config::State) -> Option<&SvgGlyph> {
+        let key: u8 = state.into();
         if let std::collections::hash_map::Entry::Vacant(entry) = glyphs.entry(key) {
             let svg = state.glyph_svg()?;
             match SvgGlyph::parse(svg) {
@@ -406,7 +409,10 @@ impl VnStudioApp {
     }
 }
 
-impl eframe::App for VnStudioApp {
+impl<Config: CellularAutomataConfig> eframe::App for VnStudioApp<Config>
+where
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
+{
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.update_simulation(ctx);
 
@@ -426,14 +432,6 @@ struct VisibleCellRange {
     max_x: isize,
     min_y: isize,
     max_y: isize,
-}
-
-fn seed_game_of_life(automaton: &mut GameOfLife) {
-    automaton.set_state(1, 0, GameOfLifeState::Live);
-    automaton.set_state(2, 1, GameOfLifeState::Live);
-    automaton.set_state(0, 2, GameOfLifeState::Live);
-    automaton.set_state(1, 2, GameOfLifeState::Live);
-    automaton.set_state(2, 2, GameOfLifeState::Live);
 }
 
 fn visible_cell_range(rect: Rect, pan: Vec2, zoom: f32) -> VisibleCellRange {
@@ -477,7 +475,13 @@ fn fixed_steps_due(
     steps
 }
 
-fn build_pixel_image(automaton: &GameOfLife, visible: &VisibleCellRange) -> ColorImage {
+fn build_pixel_image<Config: CellularAutomataConfig>(
+    automaton: &CellularAutomaton<Config>,
+    visible: &VisibleCellRange,
+) -> ColorImage
+where
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
+{
     let width = (visible.max_x - visible.min_x + 1) as usize;
     let height = (visible.max_y - visible.min_y + 1) as usize;
     let mut image = ColorImage::filled([width, height], Color32::TRANSPARENT);
@@ -545,6 +549,8 @@ fn zoom_level_after_scroll(
 
 #[cfg(test)]
 mod tests {
+    use crate::automata::game_of_life::{GameOfLife, GameOfLifeState};
+
     use super::*;
 
     #[test]

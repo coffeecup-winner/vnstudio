@@ -47,6 +47,13 @@ pub trait CellStateVisuals: CellState {
     fn pixel_color(self) -> Option<[u8; 3]>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell<State: CellState> {
+    pub x: isize,
+    pub y: isize,
+    pub state: State,
+}
+
 pub trait CellNeighborhood<State: CellState>:
     Default + Clone + Debug + Send + Sync + 'static
 {
@@ -132,7 +139,7 @@ pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 
 pub trait CellularAutomataConfig {
     const NAME: &'static str;
-    type State: CellState;
+    type State: CellState + CellStateVisuals;
     type Neighborhood: CellNeighborhood<Self::State>;
     type Evaluator: CellRuleEvaluator<Self::State, Self::Neighborhood> + Default + 'static;
 }
