@@ -55,6 +55,24 @@ pub struct VonNeumannNeighborhood<State: CellState> {
     pub neighbors: [State; 4],
 }
 
+impl<State: CellState> VonNeumannNeighborhood<State> {
+    pub fn up(&self) -> State {
+        self.neighbors[0]
+    }
+
+    pub fn down(&self) -> State {
+        self.neighbors[3]
+    }
+
+    pub fn left(&self) -> State {
+        self.neighbors[1]
+    }
+
+    pub fn right(&self) -> State {
+        self.neighbors[2]
+    }
+}
+
 impl<State: CellState> CellNeighborhood<State> for VonNeumannNeighborhood<State> {
     const NUM_CELLS: u8 = 4;
 
