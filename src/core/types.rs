@@ -21,6 +21,7 @@ pub trait CellState:
     + EnumCount
     + Send
     + Sync
+    + CellStateVisuals
     + 'static
 {
 }
@@ -38,11 +39,12 @@ impl<T> CellState for T where
         + EnumCount
         + Send
         + Sync
+        + CellStateVisuals
         + 'static
 {
 }
 
-pub trait CellStateVisuals: CellState {
+pub trait CellStateVisuals {
     fn glyph_svg(self) -> Option<&'static str>;
     fn pixel_color(self) -> Option<[u8; 3]>;
 }
@@ -139,7 +141,7 @@ pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 
 pub trait CellularAutomataConfig {
     const NAME: &'static str;
-    type State: CellState + CellStateVisuals;
+    type State: CellState;
     type Neighborhood: CellNeighborhood<Self::State>;
     type Evaluator: CellRuleEvaluator<Self::State, Self::Neighborhood> + Default + 'static;
 }
