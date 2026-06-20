@@ -1,23 +1,26 @@
+use std::marker::PhantomData;
+
 use super::types::*;
 
-pub struct RuleLUT<const NEIGHBORHOOD_SIZE: usize, State: CellState> {
+pub struct RuleLUT<State: CellState, Neighborhood: CellNeighborhood<State>> {
     lut: Vec<State>,
+    _phantom_data: PhantomData<Neighborhood>,
 }
 
-impl<const NEIGHBORHOOD_SIZE: usize, State: CellState> CellRuleEvaluator<NEIGHBORHOOD_SIZE, State>
-    for RuleLUT<NEIGHBORHOOD_SIZE, State>
+impl<State: CellState, Neighborhood: CellNeighborhood<State>> CellRuleEvaluator<State, Neighborhood>
+    for RuleLUT<State, Neighborhood>
 {
-    fn evaluate(&self, state: State, neighbors: &[State; NEIGHBORHOOD_SIZE]) -> State {
+    fn evaluate(&self, state: State, neighbors: &Neighborhood) -> State {
         self.lut[Self::to_index(state, neighbors)]
     }
 }
 
-impl<const NEIGHBORHOOD_SIZE: usize, State: CellState> RuleLUT<NEIGHBORHOOD_SIZE, State> {
-    pub fn compute(evaluator: &dyn CellRuleEvaluator<NEIGHBORHOOD_SIZE, State>) -> Self {
+impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Neighborhood> {
+    pub fn compute(evaluator: &dyn CellRuleEvaluator<State, Neighborhood>) -> Self {
         let num_states = State::NUM_STATES;
         let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
 
-        let size = 1 << (num_bits_per_state as usize * (NEIGHBORHOOD_SIZE + 1));
+        let size = 1 << (num_bits_per_state as usize * (Neighborhood::NUM_CELLS as usize + 1));
         let mut lut = vec![State::default(); size];
 
         for (i, result) in lut.iter_mut().enumerate() {
@@ -26,16 +29,19 @@ impl<const NEIGHBORHOOD_SIZE: usize, State: CellState> RuleLUT<NEIGHBORHOOD_SIZE
             }
         }
 
-        Self { lut }
+        Self {
+            lut,
+            _phantom_data: PhantomData,
+        }
     }
 
-    fn to_index(state: State, neighbors: &[State; NEIGHBORHOOD_SIZE]) -> usize {
+    fn to_index(state: State, neighbors: &Neighborhood) -> usize {
         // If these are not made const by the compiler, it will be slow
         let num_states = State::NUM_STATES;
         let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
 
         let mut index = Into::<u8>::into(state) as usize;
-        for s in neighbors {
+        for s in neighbors.neighbors() {
             index <<= num_bits_per_state;
             index |= Into::<u8>::into(*s) as usize;
         }
@@ -43,15 +49,15 @@ impl<const NEIGHBORHOOD_SIZE: usize, State: CellState> RuleLUT<NEIGHBORHOOD_SIZE
         index
     }
 
-    fn from_index(mut index: usize) -> Option<(State, [State; NEIGHBORHOOD_SIZE])> {
+    fn from_index(mut index: usize) -> Option<(State, Neighborhood)> {
         // If these are not made const by the compiler, it will be slow
         let num_states = State::NUM_STATES;
         let num_bits_per_state = u8::BITS - (num_states - 1).leading_zeros();
 
-        let mut neighbors: [State; NEIGHBORHOOD_SIZE] = [State::default(); NEIGHBORHOOD_SIZE];
-        for i in (0..NEIGHBORHOOD_SIZE).rev() {
+        let mut neighbors = Neighborhood::default();
+        for i in (0..Neighborhood::NUM_CELLS as usize).rev() {
             let component = (index & ((1 << num_bits_per_state) - 1)) as u8;
-            neighbors[i] = component.try_into().ok()?;
+            neighbors.neighbors_mut()[i] = component.try_into().ok()?;
             index >>= num_bits_per_state;
         }
 

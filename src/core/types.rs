@@ -1,69 +1,123 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
-use crate::core::rule_lut::RuleLUT;
+use crate::core::evaluator::BasicEvaluator;
 
-use super::storage::ChunkStorage;
+use super::{
+    rule_lut::RuleLUT,
+    storage::{Chunk, ChunkStorage, FillNeighborhood},
+};
 
 // IMPORTANT: Default state must be equal to 0u8.try_into().unwrap()
 pub trait CellState:
-    TryFrom<u8> + Into<u8> + Default + Clone + Copy + PartialEq + Eq + Debug + 'static
+    TryFrom<u8> + Into<u8> + Default + Clone + Copy + PartialEq + Eq + Debug + Display + 'static
 {
     const NUM_STATES: u8;
 }
 
-#[derive(Debug)]
-pub struct Chunk<const SIZE: usize, State: CellState> {
-    cells: [State; SIZE],
+pub trait CellNeighborhood<State: CellState>: Default + Clone + Debug + 'static {
+    const NUM_CELLS: u8;
+
+    fn neighbors(&self) -> &[State];
+    fn neighbors_mut(&mut self) -> &mut [State];
 }
 
-impl<const SIZE: usize, State: CellState> Default for Chunk<SIZE, State> {
-    fn default() -> Self {
-        Self {
-            cells: [State::default(); SIZE],
-        }
+#[derive(Debug, Default, Clone)]
+pub struct VonNeumannNeighborhood<State: CellState> {
+    pub neighbors: [State; 4],
+}
+
+impl<State: CellState> CellNeighborhood<State> for VonNeumannNeighborhood<State> {
+    const NUM_CELLS: u8 = 4;
+
+    fn neighbors(&self) -> &[State] {
+        &self.neighbors
+    }
+
+    fn neighbors_mut(&mut self) -> &mut [State] {
+        &mut self.neighbors
     }
 }
 
-pub trait CellRuleEvaluator<const NEIGHBORHOOD_SIZE: usize, State: CellState> {
-    fn evaluate(&self, state: State, neighbors: &[State; NEIGHBORHOOD_SIZE]) -> State;
+#[derive(Debug, Default, Clone)]
+pub struct MooreNeighborhood<State: CellState> {
+    pub neighbors: [State; 8],
 }
 
-pub trait CellularAutomataConfig<const NEIGHBORHOOD_SIZE: usize> {
+impl<State: CellState> CellNeighborhood<State> for MooreNeighborhood<State> {
+    const NUM_CELLS: u8 = 8;
+
+    fn neighbors(&self) -> &[State] {
+        &self.neighbors
+    }
+
+    fn neighbors_mut(&mut self) -> &mut [State] {
+        &mut self.neighbors
+    }
+}
+
+pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>> {
+    fn evaluate(&self, state: State, neighbors: &Neighborhood) -> State;
+}
+
+pub struct CellStateChange<State: CellState> {
+    pub chunk_coords: (isize, isize),
+    pub cell_index_in_chunk: usize,
+    pub old_state: State,
+    pub new_state: State,
+}
+
+pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>> {
+    fn evaluate_all(
+        &mut self,
+        storage: &ChunkStorage<State>,
+        evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
+    ) -> Vec<CellStateChange<State>>;
+}
+
+pub trait CellularAutomataConfig {
     type State: CellState;
-    type Evaluator: CellRuleEvaluator<NEIGHBORHOOD_SIZE, Self::State> + Default + 'static;
+    type Neighborhood: CellNeighborhood<Self::State>;
+    type Evaluator: CellRuleEvaluator<Self::State, Self::Neighborhood> + Default + 'static;
 }
 
-pub struct CellularAutomaton<
-    const NEIGHBORHOOD_SIZE: usize,
-    Config: CellularAutomataConfig<NEIGHBORHOOD_SIZE>,
-    const CHUNK_SIZE: usize = 64,
-> {
-    storage: ChunkStorage<CHUNK_SIZE, Config::State>,
-    evaluator: Box<dyn CellRuleEvaluator<NEIGHBORHOOD_SIZE, Config::State>>,
+pub struct CellularAutomaton<Config: CellularAutomataConfig> {
+    storage: ChunkStorage<Config::State>,
+    rule_evaluator: Box<dyn CellRuleEvaluator<Config::State, Config::Neighborhood>>,
+    grid_evaluator: Box<dyn CellGridEvaluator<Config::State, Config::Neighborhood>>,
 }
 
-impl<
-    const NEIGHBORHOOD_SIZE: usize,
-    Config: CellularAutomataConfig<NEIGHBORHOOD_SIZE>,
-    const CHUNK_SIZE: usize,
-> CellularAutomaton<NEIGHBORHOOD_SIZE, Config, CHUNK_SIZE>
+impl<Config: CellularAutomataConfig> CellularAutomaton<Config>
+where
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
 {
     pub fn new() -> Self {
         Self {
             storage: ChunkStorage::new(),
-            evaluator: Box::new(Config::Evaluator::default()),
+            rule_evaluator: Box::new(Config::Evaluator::default()),
+            grid_evaluator: Box::new(BasicEvaluator),
         }
     }
 
+    pub fn get_state(&self, x: isize, y: isize) -> Config::State {
+        self.storage.get_state(x, y)
+    }
+
+    pub fn set_state(&mut self, x: isize, y: isize, new_state: Config::State) {
+        self.storage.set_state(x, y, new_state);
+    }
+
     pub fn switch_to_lut(&mut self) {
-        self.evaluator = Box::new(RuleLUT::<NEIGHBORHOOD_SIZE, Config::State>::compute(
-            &*self.evaluator,
+        self.rule_evaluator = Box::new(RuleLUT::<Config::State, Config::Neighborhood>::compute(
+            &*self.rule_evaluator,
         ));
     }
+
+    pub fn evaluate_next<Evaluator: CellGridEvaluator<Config::State, Config::Neighborhood>>(
+        &mut self,
+    ) {
+        let changes = self
+            .grid_evaluator
+            .evaluate_all(&self.storage, &*self.rule_evaluator);
+        self.storage.apply_changes(&changes);
+    }
 }
-
-pub type VonNeumannAutomaton<Config, const CHUNK_SIZE: usize = 64> =
-    CellularAutomaton<4, Config, CHUNK_SIZE>;
-
-pub type MooreAutomaton<Config, const CHUNK_SIZE: usize = 64> =
-    CellularAutomaton<8, Config, CHUNK_SIZE>;

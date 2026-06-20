@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::core::types::*;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,16 @@ impl From<GameOfLifeState> for u8 {
     }
 }
 
+impl Display for GameOfLifeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let char = match &self {
+            GameOfLifeState::Dead => "_",
+            GameOfLifeState::Live => "O",
+        };
+        f.write_str(char)
+    }
+}
+
 impl CellState for GameOfLifeState {
     const NUM_STATES: u8 = 2;
 }
@@ -35,13 +47,16 @@ impl CellState for GameOfLifeState {
 #[derive(Default)]
 pub struct GameOfLifeEvaluator;
 
-impl CellRuleEvaluator<8, GameOfLifeState> for GameOfLifeEvaluator {
+impl CellRuleEvaluator<GameOfLifeState, MooreNeighborhood<GameOfLifeState>>
+    for GameOfLifeEvaluator
+{
     fn evaluate(
         &self,
         state: GameOfLifeState,
-        neighbors: &[GameOfLifeState; 8],
+        neighbors: &MooreNeighborhood<GameOfLifeState>,
     ) -> GameOfLifeState {
         let num_live_neighbors = neighbors
+            .neighbors()
             .iter()
             .filter(|s| **s == GameOfLifeState::Live)
             .count();
@@ -62,9 +77,10 @@ impl CellRuleEvaluator<8, GameOfLifeState> for GameOfLifeEvaluator {
 
 pub struct GameOfLifeConfig;
 
-impl CellularAutomataConfig<8> for GameOfLifeConfig {
+impl CellularAutomataConfig for GameOfLifeConfig {
     type State = GameOfLifeState;
     type Evaluator = GameOfLifeEvaluator;
+    type Neighborhood = MooreNeighborhood<GameOfLifeState>;
 }
 
-pub type GameOfLife = MooreAutomaton<GameOfLifeConfig>;
+pub type GameOfLife = CellularAutomaton<GameOfLifeConfig>;
