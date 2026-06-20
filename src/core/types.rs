@@ -124,11 +124,15 @@ pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 }
 
 pub struct CellStateChange<State: CellState> {
-    pub chunk_coords: (isize, isize),
     pub cell_index_in_chunk: (usize, usize),
     #[allow(unused)]
     pub old_state: State,
     pub new_state: State,
+}
+
+pub struct ChunkStateChanges<State: CellState> {
+    pub chunk_coords: (isize, isize),
+    pub changes: Vec<CellStateChange<State>>,
 }
 
 pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>> {
@@ -136,7 +140,7 @@ pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
         &mut self,
         storage: &ChunkStorage<State>,
         evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
-    ) -> Vec<CellStateChange<State>>;
+    ) -> Vec<ChunkStateChanges<State>>;
 }
 
 pub trait CellularAutomataConfig {

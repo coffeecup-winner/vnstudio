@@ -239,7 +239,17 @@ impl<State: CellState> ChunkStorage<State> {
             }
         };
         chunk.set_state(cell_x, cell_y, new_state);
+        self.set_neighbor_borders(chunk_x, chunk_y, cell_x, cell_y, new_state);
+    }
 
+    fn set_neighbor_borders(
+        &mut self,
+        chunk_x: isize,
+        chunk_y: isize,
+        cell_x: usize,
+        cell_y: usize,
+        new_state: State,
+    ) {
         // Set the external borders in neighboring chunks
         if cell_y == 0 {
             let top_chunk = self.chunks.entry((chunk_x, chunk_y - 1)).or_default();
@@ -281,15 +291,29 @@ impl<State: CellState> ChunkStorage<State> {
         self.set_state_core(chunk_x, chunk_y, cell_x, cell_y, new_state);
     }
 
-    pub fn apply_changes(&mut self, changes: &[CellStateChange<State>]) {
-        for change in changes {
-            self.set_state_core(
-                change.chunk_coords.0,
-                change.chunk_coords.1,
-                change.cell_index_in_chunk.0,
-                change.cell_index_in_chunk.1,
-                change.new_state,
-            );
+    pub fn apply_changes(&mut self, chunk_changes: &[ChunkStateChanges<State>]) {
+        for chunk_changes in chunk_changes {
+            let (chunk_x, chunk_y) = chunk_changes.chunk_coords;
+            {
+                let chunk = self.chunks.entry((chunk_x, chunk_y)).or_default();
+                for change in &chunk_changes.changes {
+                    chunk.set_state(
+                        change.cell_index_in_chunk.0,
+                        change.cell_index_in_chunk.1,
+                        change.new_state,
+                    );
+                }
+            }
+
+            for change in &chunk_changes.changes {
+                self.set_neighbor_borders(
+                    chunk_x,
+                    chunk_y,
+                    change.cell_index_in_chunk.0,
+                    change.cell_index_in_chunk.1,
+                    change.new_state,
+                );
+            }
         }
     }
 

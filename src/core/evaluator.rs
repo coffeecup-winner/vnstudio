@@ -9,7 +9,7 @@ fn evaluate_chunk<State: CellState, Neighborhood: CellNeighborhood<State>>(
     coords: &(isize, isize),
     chunk: &Chunk<State>,
     evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
-) -> Vec<CellStateChange<State>>
+) -> Option<ChunkStateChanges<State>>
 where
     Chunk<State>: FillNeighborhood<State, Neighborhood>,
 {
@@ -24,7 +24,6 @@ where
             let new_state = evaluator.evaluate(state, &neighborhood);
             if state != new_state {
                 changes.push(CellStateChange {
-                    chunk_coords: *coords,
                     cell_index_in_chunk: (x, y),
                     old_state: state,
                     new_state,
@@ -36,7 +35,10 @@ where
         index += 2;
     }
 
-    changes
+    (!changes.is_empty()).then_some(ChunkStateChanges {
+        chunk_coords: *coords,
+        changes,
+    })
 }
 
 impl<State: CellState, Neighborhood: CellNeighborhood<State>> CellGridEvaluator<State, Neighborhood>
@@ -48,10 +50,12 @@ where
         &mut self,
         storage: &ChunkStorage<State>,
         evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
-    ) -> Vec<CellStateChange<State>> {
+    ) -> Vec<ChunkStateChanges<State>> {
         let mut changes = vec![];
         for (coords, chunk) in storage.all_chunks_iter() {
-            changes.extend(evaluate_chunk(coords, chunk, evaluator));
+            if let Some(chunk_changes) = evaluate_chunk(coords, chunk, evaluator) {
+                changes.push(chunk_changes);
+            }
         }
 
         changes
@@ -69,11 +73,11 @@ where
         &mut self,
         storage: &ChunkStorage<State>,
         evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
-    ) -> Vec<CellStateChange<State>> {
+    ) -> Vec<ChunkStateChanges<State>> {
         storage
             .all_chunks_iter()
             .par_bridge()
-            .flat_map_iter(|(coords, chunk)| evaluate_chunk(coords, chunk, evaluator))
+            .filter_map(|(coords, chunk)| evaluate_chunk(coords, chunk, evaluator))
             .collect()
     }
 }
