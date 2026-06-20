@@ -40,6 +40,7 @@ impl<T> CellState for T where
 
 pub trait CellStateVisuals: CellState {
     fn glyph_svg(self) -> Option<&'static str>;
+    fn pixel_color(self) -> Option<[u8; 3]>;
 }
 
 pub trait CellNeighborhood<State: CellState>: Default + Clone + Debug + 'static {
@@ -127,8 +128,18 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_state(&self, x: isize, y: isize) -> Config::State {
         self.storage.get_state(x, y)
+    }
+
+    pub fn visit_non_default_cells(
+        &self,
+        min: (isize, isize),
+        max: (isize, isize),
+        visitor: impl FnMut(isize, isize, Config::State),
+    ) {
+        self.storage.visit_non_default_cells(min, max, visitor);
     }
 
     pub fn set_state(&mut self, x: isize, y: isize, new_state: Config::State) {

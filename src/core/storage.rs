@@ -156,6 +156,7 @@ impl<State: CellState> ChunkStorage<State> {
         (chunk_coord, cell_coord)
     }
 
+    #[allow(dead_code)]
     pub fn get_state(&self, x: isize, y: isize) -> State {
         let (chunk_x, cell_x) = Self::split_cell_coord(x);
         let (chunk_y, cell_y) = Self::split_cell_coord(y);
@@ -163,6 +164,50 @@ impl<State: CellState> ChunkStorage<State> {
             chunk.get_state(cell_x, cell_y)
         } else {
             State::default()
+        }
+    }
+
+    pub fn visit_non_default_cells(
+        &self,
+        min: (isize, isize),
+        max: (isize, isize),
+        mut visitor: impl FnMut(isize, isize, State),
+    ) {
+        if min.0 > max.0 || min.1 > max.1 {
+            return;
+        }
+
+        let (min_chunk_x, _) = Self::split_cell_coord(min.0);
+        let (max_chunk_x, _) = Self::split_cell_coord(max.0);
+        let (min_chunk_y, _) = Self::split_cell_coord(min.1);
+        let (max_chunk_y, _) = Self::split_cell_coord(max.1);
+
+        for chunk_y in min_chunk_y..=max_chunk_y {
+            for chunk_x in min_chunk_x..=max_chunk_x {
+                let Some(chunk) = self.chunks.get(&(chunk_x, chunk_y)) else {
+                    continue;
+                };
+
+                let world_min_x = chunk_x * CHUNK_SIZE as isize;
+                let world_min_y = chunk_y * CHUNK_SIZE as isize;
+                let local_min_x = (min.0 - world_min_x).clamp(0, CHUNK_SIZE as isize - 1) as usize;
+                let local_max_x = (max.0 - world_min_x).clamp(0, CHUNK_SIZE as isize - 1) as usize;
+                let local_min_y = (min.1 - world_min_y).clamp(0, CHUNK_SIZE as isize - 1) as usize;
+                let local_max_y = (max.1 - world_min_y).clamp(0, CHUNK_SIZE as isize - 1) as usize;
+
+                for cell_y in local_min_y..=local_max_y {
+                    for cell_x in local_min_x..=local_max_x {
+                        let state = chunk.get_state(cell_x, cell_y);
+                        if state != State::default() {
+                            visitor(
+                                world_min_x + cell_x as isize,
+                                world_min_y + cell_y as isize,
+                                state,
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -238,5 +283,33 @@ impl<State: CellState> ChunkStorage<State> {
                 change.new_state,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::game_of_life::GameOfLifeState;
+
+    #[test]
+    fn visits_non_default_cells_within_bounds() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(-1, -1, GameOfLifeState::Live);
+        storage.set_state(63, 63, GameOfLifeState::Live);
+        storage.set_state(64, 64, GameOfLifeState::Live);
+
+        let mut visited = Vec::new();
+        storage.visit_non_default_cells((-1, -1), (63, 63), |x, y, state| {
+            visited.push((x, y, state));
+        });
+        visited.sort_by_key(|(x, y, _)| (*x, *y));
+
+        assert_eq!(
+            visited,
+            vec![
+                (-1, -1, GameOfLifeState::Live),
+                (63, 63, GameOfLifeState::Live),
+            ]
+        );
     }
 }

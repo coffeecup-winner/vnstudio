@@ -31,6 +31,13 @@ impl CellStateVisuals for GameOfLifeState {
             GameOfLifeState::Live => Some(include_str!("glyphs/live.svg")),
         }
     }
+
+    fn pixel_color(self) -> Option<[u8; 3]> {
+        match self {
+            GameOfLifeState::Dead => None,
+            GameOfLifeState::Live => Some([32, 33, 36]),
+        }
+    }
 }
 
 #[derive(Default)]
