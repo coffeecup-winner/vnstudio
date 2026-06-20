@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{self, Color32, Context, PointerButton, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -12,12 +15,51 @@ use super::svg_glyph::SvgGlyph;
 const INITIAL_CELL_SIZE: f32 = 28.0;
 const MIN_CELL_SIZE: f32 = 2.0;
 const MAX_CELL_SIZE: f32 = 160.0;
+const FIXED_SPEED_MAX_STEPS_PER_FRAME: u32 = 8;
+const REALTIME_FRAME_BUDGET: Duration = Duration::from_millis(12);
+const REPAINT_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const BASE_TITLE: &str = "VNStudio";
 
 pub struct VnStudioApp {
     automaton: GameOfLife,
     zoom: f32,
     pan: Vec2,
     glyphs: HashMap<u8, SvgGlyph>,
+    is_running: bool,
+    speed: SimulationSpeed,
+    step_accumulator: f64,
+    last_update_time: Option<f64>,
+    ups_window_start: f64,
+    updates_this_window: u32,
+    title_shows_realtime_ups: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimulationSpeed {
+    Normal,
+    Faster,
+    Fast,
+    Realtime,
+}
+
+impl SimulationSpeed {
+    fn label(self) -> &'static str {
+        match self {
+            SimulationSpeed::Normal => "Normal (2 UPS)",
+            SimulationSpeed::Faster => "Faster (5 UPS)",
+            SimulationSpeed::Fast => "Fast (10 UPS)",
+            SimulationSpeed::Realtime => "Realtime",
+        }
+    }
+
+    fn fixed_updates_per_second(self) -> Option<f64> {
+        match self {
+            SimulationSpeed::Normal => Some(2.0),
+            SimulationSpeed::Faster => Some(5.0),
+            SimulationSpeed::Fast => Some(10.0),
+            SimulationSpeed::Realtime => None,
+        }
+    }
 }
 
 impl VnStudioApp {
@@ -31,6 +73,13 @@ impl VnStudioApp {
             zoom: INITIAL_CELL_SIZE,
             pan: Vec2::ZERO,
             glyphs: HashMap::new(),
+            is_running: false,
+            speed: SimulationSpeed::Normal,
+            step_accumulator: 0.0,
+            last_update_time: None,
+            ups_window_start: 0.0,
+            updates_this_window: 0,
+            title_shows_realtime_ups: false,
         }
     }
 
@@ -53,10 +102,109 @@ impl VnStudioApp {
         egui::CollapsingHeader::new("Simulation")
             .default_open(true)
             .show(ui, |ui| {
-                if ui.button("Step").clicked() {
-                    self.automaton.evaluate_next();
+                ui.horizontal(|ui| {
+                    let label = if self.is_running { "Pause" } else { "Run" };
+                    if ui.button(label).clicked() {
+                        self.is_running = !self.is_running;
+                        self.reset_timing(ui.ctx().input(|input| input.time));
+                    }
+
+                    if ui.button("Step").clicked() {
+                        self.automaton.evaluate_next();
+                        if self.is_running && self.speed == SimulationSpeed::Realtime {
+                            self.updates_this_window += 1;
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                for speed in [
+                    SimulationSpeed::Normal,
+                    SimulationSpeed::Faster,
+                    SimulationSpeed::Fast,
+                    SimulationSpeed::Realtime,
+                ] {
+                    if ui
+                        .radio_value(&mut self.speed, speed, speed.label())
+                        .changed()
+                    {
+                        self.reset_timing(ui.ctx().input(|input| input.time));
+                    }
                 }
             });
+    }
+
+    fn reset_timing(&mut self, now: f64) {
+        self.step_accumulator = 0.0;
+        self.last_update_time = Some(now);
+        self.ups_window_start = now;
+        self.updates_this_window = 0;
+    }
+
+    fn update_simulation(&mut self, ctx: &Context) {
+        let now = ctx.input(|input| input.time);
+        let elapsed = self
+            .last_update_time
+            .replace(now)
+            .map_or(0.0, |last| (now - last).max(0.0));
+
+        if self.is_running {
+            match self.speed {
+                SimulationSpeed::Realtime => self.update_realtime(),
+                speed => {
+                    if let Some(updates_per_second) = speed.fixed_updates_per_second() {
+                        let steps = fixed_steps_due(
+                            &mut self.step_accumulator,
+                            elapsed,
+                            updates_per_second,
+                            FIXED_SPEED_MAX_STEPS_PER_FRAME,
+                        );
+                        for _ in 0..steps {
+                            self.automaton.evaluate_next();
+                        }
+                    }
+                }
+            }
+
+            ctx.request_repaint_after(REPAINT_INTERVAL);
+        }
+
+        self.update_title(ctx, now);
+    }
+
+    fn update_realtime(&mut self) {
+        let start = Instant::now();
+        let mut steps = 0;
+
+        loop {
+            self.automaton.evaluate_next();
+            steps += 1;
+
+            if start.elapsed() >= REALTIME_FRAME_BUDGET {
+                break;
+            }
+        }
+
+        self.updates_this_window += steps;
+    }
+
+    fn update_title(&mut self, ctx: &Context, now: f64) {
+        if self.is_running && self.speed == SimulationSpeed::Realtime {
+            if now - self.ups_window_start >= 1.0 {
+                let elapsed = (now - self.ups_window_start).max(1.0);
+                let ups = (self.updates_this_window as f64 / elapsed).round() as u32;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                    "{BASE_TITLE} - Realtime: {ups} UPS"
+                )));
+                self.ups_window_start = now;
+                self.updates_this_window = 0;
+                self.title_shows_realtime_ups = true;
+            }
+        } else if self.title_shows_realtime_ups {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(BASE_TITLE.to_string()));
+            self.title_shows_realtime_ups = false;
+        }
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui, ctx: &Context) {
@@ -174,6 +322,8 @@ impl VnStudioApp {
 
 impl eframe::App for VnStudioApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.update_simulation(ctx);
+
         egui::SidePanel::left("tools")
             .resizable(true)
             .default_width(260.0)
@@ -228,6 +378,19 @@ fn world_to_screen(rect: Rect, pan: Vec2, zoom: f32, x: f32, y: f32) -> Pos2 {
     rect.center() + pan + Vec2::new(x * zoom, y * zoom)
 }
 
+fn fixed_steps_due(
+    accumulator: &mut f64,
+    elapsed: f64,
+    updates_per_second: f64,
+    max_steps: u32,
+) -> u32 {
+    *accumulator += elapsed * updates_per_second;
+    let steps = (*accumulator).floor() as u32;
+    let steps = steps.min(max_steps);
+    *accumulator -= steps as f64;
+    steps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +404,22 @@ mod tests {
         let world = screen_to_world(rect, pan, zoom, screen);
 
         assert_eq!(world, Pos2::new(-3.0, 5.0));
+    }
+
+    #[test]
+    fn fixed_steps_accumulate_fractional_time() {
+        let mut accumulator = 0.0;
+
+        assert_eq!(fixed_steps_due(&mut accumulator, 0.20, 2.0, 8), 0);
+        assert_eq!(fixed_steps_due(&mut accumulator, 0.30, 2.0, 8), 1);
+        assert_eq!(accumulator, 0.0);
+    }
+
+    #[test]
+    fn fixed_steps_are_capped() {
+        let mut accumulator = 0.0;
+
+        assert_eq!(fixed_steps_due(&mut accumulator, 10.0, 10.0, 8), 8);
+        assert!(accumulator > 0.0);
     }
 }
