@@ -46,6 +46,46 @@ impl<State: CellState> Chunk<State> {
         index += x;
         self.cells[index] = new_state;
     }
+
+    #[inline]
+    pub fn set_top_border(&mut self, x: usize, new_state: State) {
+        self.cells[x + 1] = new_state;
+    }
+
+    #[inline]
+    pub fn set_bottom_border(&mut self, x: usize, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE * (EXTENDED_CHUNK_SIZE - 1) + x + 1] = new_state;
+    }
+
+    #[inline]
+    pub fn set_left_border(&mut self, y: usize, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE * (y + 1)] = new_state;
+    }
+
+    #[inline]
+    pub fn set_right_border(&mut self, y: usize, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE * (y + 1) + EXTENDED_CHUNK_SIZE - 1] = new_state;
+    }
+
+    #[inline]
+    pub fn set_top_left_corner(&mut self, new_state: State) {
+        self.cells[0] = new_state;
+    }
+
+    #[inline]
+    pub fn set_top_right_corner(&mut self, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE - 1] = new_state;
+    }
+
+    #[inline]
+    pub fn set_bottom_left_corner(&mut self, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE * (EXTENDED_CHUNK_SIZE - 1)] = new_state;
+    }
+
+    #[inline]
+    pub fn set_bottom_right_corner(&mut self, new_state: State) {
+        self.cells[EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE - 1] = new_state;
+    }
 }
 
 impl<State: CellState> FillNeighborhood<State, MooreNeighborhood<State>> for Chunk<State> {
@@ -127,7 +167,44 @@ impl<State: CellState> ChunkStorage<State> {
     }
 
     pub fn set_state(&mut self, x: isize, y: isize, new_state: State) {
-        // TODO
+        let (chunk_x, cell_x) = Self::split_cell_coord(x);
+        let (chunk_y, cell_y) = Self::split_cell_coord(y);
+        let chunk = self.chunks.entry((chunk_x, chunk_y)).or_default();
+        chunk.set_state(cell_x, cell_y, new_state);
+
+        // Set the external borders in neighboring chunks
+        if cell_y == 0 {
+            let top_chunk = self.chunks.entry((chunk_x, chunk_y - 1)).or_default();
+            top_chunk.set_bottom_border(cell_x, new_state);
+
+            // TODO: Only do this for Moore?
+            if cell_x == 0 {
+                let top_left_chunk = self.chunks.entry((chunk_x - 1, chunk_y - 1)).or_default();
+                top_left_chunk.set_bottom_right_corner(new_state);
+            } else if cell_x == CHUNK_SIZE - 1 {
+                let top_right_chunk = self.chunks.entry((chunk_x + 1, chunk_y - 1)).or_default();
+                top_right_chunk.set_bottom_left_corner(new_state);
+            }
+        } else if cell_y == CHUNK_SIZE - 1 {
+            let bottom_chunk = self.chunks.entry((chunk_x, chunk_y + 1)).or_default();
+            bottom_chunk.set_top_border(cell_x, new_state);
+
+            // TODO: Only do this for Moore?
+            if cell_x == 0 {
+                let bottom_left_chunk = self.chunks.entry((chunk_x - 1, chunk_y + 1)).or_default();
+                bottom_left_chunk.set_top_right_corner(new_state);
+            } else if cell_x == CHUNK_SIZE - 1 {
+                let bottom_right_chunk = self.chunks.entry((chunk_x + 1, chunk_y + 1)).or_default();
+                bottom_right_chunk.set_top_left_corner(new_state);
+            }
+        }
+        if cell_x == 0 {
+            let left_chunk = self.chunks.entry((chunk_x - 1, chunk_y)).or_default();
+            left_chunk.set_right_border(cell_y, new_state);
+        } else if cell_x == CHUNK_SIZE - 1 {
+            let right_chunk = self.chunks.entry((chunk_x + 1, chunk_y)).or_default();
+            right_chunk.set_left_border(cell_y, new_state);
+        }
     }
 
     pub fn apply_changes(&mut self, changes: &[CellStateChange<State>]) {

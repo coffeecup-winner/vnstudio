@@ -62,6 +62,7 @@ pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
 pub struct CellStateChange<State: CellState> {
     pub chunk_coords: (isize, isize),
     pub cell_index_in_chunk: usize,
+    #[allow(unused)]
     pub old_state: State,
     pub new_state: State,
 }
