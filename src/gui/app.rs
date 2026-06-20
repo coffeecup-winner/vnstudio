@@ -214,8 +214,9 @@ impl VnStudioApp {
             if now - self.ups_window_start >= 1.0 {
                 let elapsed = (now - self.ups_window_start).max(1.0);
                 let ups = (self.updates_this_window as f64 / elapsed).round() as u32;
+                let chunks = self.automaton.chunk_count();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{BASE_TITLE} - Realtime: {ups} UPS"
+                    "{BASE_TITLE} - Realtime: {ups} UPS - {chunks} chunks"
                 )));
                 self.ups_window_start = now;
                 self.updates_this_window = 0;

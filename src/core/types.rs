@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use crate::core::evaluator::BasicEvaluator;
+use crate::core::evaluator::ParallelEvaluator;
 use strum::EnumCount;
 
 use super::{
@@ -150,7 +150,7 @@ where
         Self {
             storage: ChunkStorage::new(),
             rule_evaluator: Box::new(Config::Evaluator::default()),
-            grid_evaluator: Box::new(BasicEvaluator),
+            grid_evaluator: Box::new(ParallelEvaluator),
         }
     }
 
@@ -166,6 +166,10 @@ where
         visitor: impl FnMut(isize, isize, Config::State),
     ) {
         self.storage.visit_non_default_cells(min, max, visitor);
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.storage.chunk_count()
     }
 
     pub fn set_state(&mut self, x: isize, y: isize, new_state: Config::State) {

@@ -150,6 +150,10 @@ impl<State: CellState> ChunkStorage<State> {
         self.chunks.iter()
     }
 
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
     fn split_cell_coord(coord: isize) -> (isize, usize) {
         let chunk_coord = coord.div_euclid(CHUNK_SIZE as isize);
         let cell_coord = coord.rem_euclid(CHUNK_SIZE as isize) as usize;
@@ -311,5 +315,15 @@ mod tests {
                 (63, 63, GameOfLifeState::Live),
             ]
         );
+    }
+
+    #[test]
+    fn reports_allocated_chunk_count() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        assert_eq!(storage.chunk_count(), 0);
+
+        storage.set_state(1, 1, GameOfLifeState::Live);
+
+        assert_eq!(storage.chunk_count(), 1);
     }
 }
