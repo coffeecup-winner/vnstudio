@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 eframe = "0.32"
 num_enum = "0.7"
+rayon = "1.12"
 roxmltree = "0.20"
 strum = { version = "0.28", features = ["derive"] }

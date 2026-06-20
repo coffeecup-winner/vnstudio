@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use rayon::prelude::*;
+
 use super::types::*;
 
 pub struct RuleLUT<State: CellState, Neighborhood: CellNeighborhood<State>> {
@@ -34,11 +36,11 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
         );
         let mut lut = vec![State::default(); size];
 
-        for (i, result) in lut.iter_mut().enumerate() {
+        lut.par_iter_mut().enumerate().for_each(|(i, result)| {
             if let Some((state, neighbors)) = Self::from_index(i) {
                 *result = evaluator.evaluate(state, &neighbors);
             }
-        }
+        });
 
         Self {
             lut,
@@ -75,5 +77,39 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
         let state = (index as u8).try_into().ok()?;
 
         Some((state, neighbors))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::game_of_life::{GameOfLifeEvaluator, GameOfLifeState};
+
+    #[test]
+    fn parallel_lut_matches_game_of_life_evaluator() {
+        let evaluator = GameOfLifeEvaluator;
+        let lut =
+            RuleLUT::<GameOfLifeState, MooreNeighborhood<GameOfLifeState>>::compute(&evaluator);
+
+        for encoded in 0..(1 << 9) {
+            let state = if encoded & (1 << 8) == 0 {
+                GameOfLifeState::Dead
+            } else {
+                GameOfLifeState::Live
+            };
+            let mut neighbors = MooreNeighborhood::default();
+            for index in 0..8 {
+                neighbors.neighbors[index] = if encoded & (1 << (7 - index)) == 0 {
+                    GameOfLifeState::Dead
+                } else {
+                    GameOfLifeState::Live
+                };
+            }
+
+            assert_eq!(
+                lut.evaluate(state, &neighbors),
+                evaluator.evaluate(state, &neighbors)
+            );
+        }
     }
 }

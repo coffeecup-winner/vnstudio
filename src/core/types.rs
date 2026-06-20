@@ -19,6 +19,8 @@ pub trait CellState:
     + Debug
     + Display
     + EnumCount
+    + Send
+    + Sync
     + 'static
 {
 }
@@ -34,6 +36,8 @@ impl<T> CellState for T where
         + Debug
         + Display
         + EnumCount
+        + Send
+        + Sync
         + 'static
 {
 }
@@ -43,7 +47,9 @@ pub trait CellStateVisuals: CellState {
     fn pixel_color(self) -> Option<[u8; 3]>;
 }
 
-pub trait CellNeighborhood<State: CellState>: Default + Clone + Debug + 'static {
+pub trait CellNeighborhood<State: CellState>:
+    Default + Clone + Debug + Send + Sync + 'static
+{
     const NUM_CELLS: u8;
 
     fn neighbors(&self) -> &[State];
@@ -102,7 +108,9 @@ impl<State: CellState> CellNeighborhood<State> for MooreNeighborhood<State> {
     }
 }
 
-pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>> {
+pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>>:
+    Send + Sync
+{
     fn evaluate(&self, state: State, neighbors: &Neighborhood) -> State;
 }
 
