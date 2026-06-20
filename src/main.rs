@@ -45,11 +45,42 @@ where
     )
 }
 
+fn benchmark<Config>(mut automaton: CellularAutomaton<Config>)
+where
+    Config: CellularAutomataConfig,
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
+{
+    println!("Warming up");
+    for _ in 0..1000 {
+        automaton.evaluate_next();
+    }
+    println!("Starting the benchmark");
+    let start = std::time::Instant::now();
+    for _ in 0..10000 {
+        automaton.evaluate_next();
+    }
+    let end = std::time::Instant::now();
+    let total = end - start;
+    println!(
+        "Iterating 10000 times took {}ms, {} UPS",
+        total.as_millis(),
+        (10000_000f64 / total.as_millis() as f64) as u64
+    )
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = std::env::args().nth(1) {
         let pattern = golly_loader::load_jvn29_rle(PathBuf::from(path))?;
         let mut automaton = VonNeumann::new();
         pattern.apply_to(&mut automaton);
+
+        if let Some(arg) = std::env::args().nth(2)
+            && arg == "--bench"
+        {
+            benchmark(automaton);
+            return Ok(());
+        }
+
         run_app(automaton)?;
     } else {
         let mut automaton = GameOfLife::new();
