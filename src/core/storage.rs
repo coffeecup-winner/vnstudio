@@ -5,7 +5,9 @@ use super::types::*;
 // Ideally, this would be a generic const, but we can't do math on that in stable Rust yet
 pub const CHUNK_SIZE: usize = 64;
 // Size of the chunk with the external borders
-pub const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
+const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
+// Interval for automatic chunk deallocation
+const CHUNK_DEALLOCATION_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone)]
 pub struct Chunk<State: CellState> {
@@ -137,12 +139,14 @@ impl<State: CellState> FillNeighborhood<State, VonNeumannNeighborhood<State>> fo
 #[derive(Clone)]
 pub struct ChunkStorage<State: CellState> {
     chunks: HashMap<(isize, isize), Chunk<State>>,
+    cycles_since_chunk_deallocation: u64,
 }
 
 impl<State: CellState> ChunkStorage<State> {
     pub fn new() -> Self {
         Self {
             chunks: HashMap::new(),
+            cycles_since_chunk_deallocation: 0,
         }
     }
 
@@ -288,6 +292,21 @@ impl<State: CellState> ChunkStorage<State> {
             );
         }
     }
+
+    pub fn deallocate_default_chunks(&mut self) -> usize {
+        let old_chunk_count = self.chunks.len();
+        self.chunks
+            .retain(|_, chunk| chunk.cells.iter().any(|&s| s != State::default()));
+        old_chunk_count - self.chunks.len()
+    }
+
+    pub fn on_evaluate_next(&mut self) {
+        self.cycles_since_chunk_deallocation += 1;
+        if self.cycles_since_chunk_deallocation >= CHUNK_DEALLOCATION_INTERVAL {
+            self.deallocate_default_chunks();
+            self.cycles_since_chunk_deallocation = 0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +344,31 @@ mod tests {
         storage.set_state(1, 1, GameOfLifeState::Live);
 
         assert_eq!(storage.chunk_count(), 1);
+    }
+
+    #[test]
+    fn deallocates_fully_default_chunks() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(1, 1, GameOfLifeState::Live);
+        storage.set_state(1, 1, GameOfLifeState::Dead);
+
+        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.deallocate_default_chunks(), 1);
+        assert_eq!(storage.chunk_count(), 0);
+    }
+
+    #[test]
+    fn deallocates_default_chunks_on_configured_interval() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(1, 1, GameOfLifeState::Live);
+        storage.set_state(1, 1, GameOfLifeState::Dead);
+
+        for _ in 0..CHUNK_DEALLOCATION_INTERVAL - 1 {
+            storage.on_evaluate_next();
+        }
+        assert_eq!(storage.chunk_count(), 1);
+
+        storage.on_evaluate_next();
+        assert_eq!(storage.chunk_count(), 0);
     }
 }

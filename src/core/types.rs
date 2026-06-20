@@ -187,5 +187,6 @@ where
             .grid_evaluator
             .evaluate_all(&self.storage, &*self.rule_evaluator);
         self.storage.apply_changes(&changes);
+        self.storage.on_evaluate_next();
     }
 }
