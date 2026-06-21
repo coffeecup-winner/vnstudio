@@ -64,8 +64,28 @@ where
     println!(
         "Iterating 10000 times took {}ms, {} UPS",
         total.as_millis(),
-        (10000_000f64 / total.as_millis() as f64) as u64
-    )
+        (10_000_000f64 / total.as_millis() as f64) as u64
+    );
+
+    let times = automaton.operation_times();
+    let total_ops =
+        times.total_grid_evaluate + times.total_storage_apply + times.total_storage_optimize;
+    println!("Total operations: {}ms", total_ops.as_millis());
+    println!(
+        "Total grid evaluation: {}ms ({:.2}%)",
+        times.total_grid_evaluate.as_millis(),
+        times.total_grid_evaluate.as_millis() as f64 * 100.0 / total_ops.as_millis() as f64
+    );
+    println!(
+        "Total storage update: {}ms ({:.2}%)",
+        times.total_storage_apply.as_millis(),
+        times.total_storage_apply.as_millis() as f64 * 100.0 / total_ops.as_millis() as f64
+    );
+    println!(
+        "Total storage optimization: {}ms ({:.2}%)",
+        times.total_storage_optimize.as_millis(),
+        times.total_storage_optimize.as_millis() as f64 * 100.0 / total_ops.as_millis() as f64
+    );
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

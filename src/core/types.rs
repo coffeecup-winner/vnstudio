@@ -1,4 +1,7 @@
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    time::Duration,
+};
 
 use crate::core::evaluator::ParallelEvaluator;
 use strum::EnumCount;
@@ -150,10 +153,18 @@ pub trait CellularAutomataConfig {
     type Evaluator: CellRuleEvaluator<Self::State, Self::Neighborhood> + Default + 'static;
 }
 
+#[derive(Default)]
+pub struct CellularAutomatonOperationTimes {
+    pub total_grid_evaluate: Duration,
+    pub total_storage_apply: Duration,
+    pub total_storage_optimize: Duration,
+}
+
 pub struct CellularAutomaton<Config: CellularAutomataConfig> {
     storage: ChunkStorage<Config::State>,
     rule_evaluator: Box<dyn CellRuleEvaluator<Config::State, Config::Neighborhood>>,
     grid_evaluator: Box<dyn CellGridEvaluator<Config::State, Config::Neighborhood>>,
+    operation_times: CellularAutomatonOperationTimes,
 }
 
 impl<Config: CellularAutomataConfig> CellularAutomaton<Config>
@@ -165,6 +176,7 @@ where
             storage: ChunkStorage::new(),
             rule_evaluator: Box::new(Config::Evaluator::default()),
             grid_evaluator: Box::new(ParallelEvaluator),
+            operation_times: Default::default(),
         };
         automaton.switch_to_lut();
         automaton
@@ -182,6 +194,10 @@ where
         visitor: impl FnMut(isize, isize, Config::State),
     ) {
         self.storage.visit_non_default_cells(min, max, visitor);
+    }
+
+    pub fn operation_times(&self) -> &CellularAutomatonOperationTimes {
+        &self.operation_times
     }
 
     pub fn chunk_count(&self) -> usize {
@@ -206,10 +222,18 @@ where
     }
 
     pub fn evaluate_next(&mut self) {
+        let t0 = std::time::Instant::now();
         let changes = self
             .grid_evaluator
             .evaluate_all(&self.storage, &*self.rule_evaluator);
+        let t1 = std::time::Instant::now();
         self.storage.apply_changes(&changes);
+        let t2 = std::time::Instant::now();
         self.storage.on_evaluate_next();
+        let t3 = std::time::Instant::now();
+
+        self.operation_times.total_grid_evaluate += t1 - t0;
+        self.operation_times.total_storage_apply += t2 - t1;
+        self.operation_times.total_storage_optimize += t3 - t2;
     }
 }
