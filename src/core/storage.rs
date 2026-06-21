@@ -139,7 +139,7 @@ impl<State: CellState> FillNeighborhood<State, VonNeumannNeighborhood<State>> fo
 #[derive(Clone)]
 pub struct ChunkStorage<State: CellState> {
     chunks_index: HashMap<(isize, isize), usize>,
-    chunks_: Vec<Chunk<State>>,
+    chunks: Vec<Chunk<State>>,
     cycles_since_chunk_deallocation: u64,
 }
 
@@ -147,17 +147,13 @@ impl<State: CellState> ChunkStorage<State> {
     pub fn new() -> Self {
         Self {
             chunks_index: HashMap::new(),
-            chunks_: vec![],
+            chunks: vec![],
             cycles_since_chunk_deallocation: 0,
         }
     }
 
-    pub fn all_chunks_iter(&self) -> impl Iterator<Item = (&(isize, isize), &Chunk<State>)> {
-        self.chunks_.iter().map(|chunk| (&chunk.coords, chunk))
-    }
-
-    pub fn chunk_count(&self) -> usize {
-        self.chunks_.len()
+    pub fn chunks(&self) -> &[Chunk<State>] {
+        &self.chunks
     }
 
     fn split_cell_coord(coord: isize) -> (isize, usize) {
@@ -173,7 +169,7 @@ impl<State: CellState> ChunkStorage<State> {
         self.chunks_index
             .get(&(chunk_x, chunk_y))
             .map_or(State::default(), |&index| {
-                self.chunks_[index].get_state(cell_x, cell_y)
+                self.chunks[index].get_state(cell_x, cell_y)
             })
     }
 
@@ -182,15 +178,15 @@ impl<State: CellState> ChunkStorage<State> {
             return index;
         }
 
-        let index = self.chunks_.len();
-        self.chunks_.push(Chunk::new(coords));
+        let index = self.chunks.len();
+        self.chunks.push(Chunk::new(coords));
         self.chunks_index.insert(coords, index);
         index
     }
 
     fn ensure_chunk_mut(&mut self, coords: (isize, isize)) -> &mut Chunk<State> {
         let index = self.ensure_chunk(coords);
-        &mut self.chunks_[index]
+        &mut self.chunks[index]
     }
 
     pub fn visit_non_default_cells(
@@ -213,7 +209,7 @@ impl<State: CellState> ChunkStorage<State> {
                 let Some(&chunk_index) = self.chunks_index.get(&(chunk_x, chunk_y)) else {
                     continue;
                 };
-                let chunk = &self.chunks_[chunk_index];
+                let chunk = &self.chunks[chunk_index];
 
                 let world_min_x = chunk_x * CHUNK_SIZE as isize;
                 let world_min_y = chunk_y * CHUNK_SIZE as isize;
@@ -307,22 +303,20 @@ impl<State: CellState> ChunkStorage<State> {
 
     pub fn apply_changes(&mut self, chunk_changes: &[ChunkStateChanges<State>]) {
         for chunk_changes in chunk_changes {
-            let (chunk_x, chunk_y) = chunk_changes.chunk_coords;
-            {
-                let chunk = self.ensure_chunk_mut((chunk_x, chunk_y));
-                for change in &chunk_changes.changes {
-                    chunk.set_state(
-                        change.cell_index_in_chunk.0,
-                        change.cell_index_in_chunk.1,
-                        change.new_state,
-                    );
-                }
+            let chunk = &mut self.chunks[chunk_changes.chunk_index];
+            for change in &chunk_changes.changes {
+                chunk.set_state(
+                    change.cell_index_in_chunk.0,
+                    change.cell_index_in_chunk.1,
+                    change.new_state,
+                );
             }
 
+            let coords = chunk.coords;
             for change in &chunk_changes.changes {
                 self.set_neighbor_borders(
-                    chunk_x,
-                    chunk_y,
+                    coords.0,
+                    coords.1,
                     change.cell_index_in_chunk.0,
                     change.cell_index_in_chunk.1,
                     change.new_state,
@@ -332,10 +326,10 @@ impl<State: CellState> ChunkStorage<State> {
     }
 
     pub fn deallocate_default_chunks(&mut self) -> usize {
-        let old_chunk_count = self.chunks_.len();
-        self.chunks_
+        let old_chunk_count = self.chunks.len();
+        self.chunks
             .retain(|chunk| chunk.cells.iter().any(|&s| s != State::default()));
-        let num_deallocated = old_chunk_count - self.chunks_.len();
+        let num_deallocated = old_chunk_count - self.chunks.len();
         if num_deallocated > 0 {
             self.rebuild_chunks_index();
         }
@@ -344,8 +338,8 @@ impl<State: CellState> ChunkStorage<State> {
 
     fn rebuild_chunks_index(&mut self) {
         self.chunks_index.clear();
-        self.chunks_index.reserve(self.chunks_.len());
-        for (index, chunk) in self.chunks_.iter().enumerate() {
+        self.chunks_index.reserve(self.chunks.len());
+        for (index, chunk) in self.chunks.iter().enumerate() {
             self.chunks_index.insert(chunk.coords, index);
         }
     }
@@ -389,11 +383,11 @@ mod tests {
     #[test]
     fn reports_allocated_chunk_count() {
         let mut storage = ChunkStorage::<GameOfLifeState>::new();
-        assert_eq!(storage.chunk_count(), 0);
+        assert_eq!(storage.chunks().len(), 0);
 
         storage.set_state(1, 1, GameOfLifeState::Live);
 
-        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.chunks().len(), 1);
     }
 
     #[test]
@@ -402,9 +396,9 @@ mod tests {
         storage.set_state(1, 1, GameOfLifeState::Live);
         storage.set_state(1, 1, GameOfLifeState::Dead);
 
-        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.chunks().len(), 1);
         assert_eq!(storage.deallocate_default_chunks(), 1);
-        assert_eq!(storage.chunk_count(), 0);
+        assert_eq!(storage.chunks().len(), 0);
     }
 
     #[test]
@@ -416,10 +410,10 @@ mod tests {
         for _ in 0..CHUNK_DEALLOCATION_INTERVAL - 1 {
             storage.on_evaluate_next();
         }
-        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.chunks().len(), 1);
 
         storage.on_evaluate_next();
-        assert_eq!(storage.chunk_count(), 0);
+        assert_eq!(storage.chunks().len(), 0);
     }
 
     #[test]
@@ -430,7 +424,7 @@ mod tests {
         storage.set_state(1, 1, GameOfLifeState::Dead);
 
         assert_eq!(storage.deallocate_default_chunks(), 1);
-        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.chunks().len(), 1);
         assert_eq!(storage.get_state(65, 1), GameOfLifeState::Live);
 
         storage.set_state(65, 1, GameOfLifeState::Dead);

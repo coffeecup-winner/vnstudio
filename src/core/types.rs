@@ -134,7 +134,7 @@ pub struct CellStateChange<State: CellState> {
 }
 
 pub struct ChunkStateChanges<State: CellState> {
-    pub chunk_coords: (isize, isize),
+    pub chunk_index: usize,
     pub changes: Vec<CellStateChange<State>>,
 }
 
@@ -201,7 +201,7 @@ where
     }
 
     pub fn chunk_count(&self) -> usize {
-        self.storage.chunk_count()
+        self.storage.chunks().len()
     }
 
     pub fn set_state(&mut self, x: isize, y: isize, new_state: Config::State) {

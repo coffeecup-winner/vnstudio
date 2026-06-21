@@ -6,7 +6,7 @@ use rayon::prelude::*;
 pub struct BasicEvaluator;
 
 fn evaluate_chunk<State: CellState, Neighborhood: CellNeighborhood<State>>(
-    coords: &(isize, isize),
+    chunk_index: usize,
     chunk: &Chunk<State>,
     evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
 ) -> Option<ChunkStateChanges<State>>
@@ -48,7 +48,7 @@ where
     }
 
     (!changes.is_empty()).then_some(ChunkStateChanges {
-        chunk_coords: *coords,
+        chunk_index,
         changes,
     })
 }
@@ -64,8 +64,8 @@ where
         evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
     ) -> Vec<ChunkStateChanges<State>> {
         let mut changes = vec![];
-        for (coords, chunk) in storage.all_chunks_iter() {
-            if let Some(chunk_changes) = evaluate_chunk(coords, chunk, evaluator) {
+        for (index, chunk) in storage.chunks().iter().enumerate() {
+            if let Some(chunk_changes) = evaluate_chunk(index, chunk, evaluator) {
                 changes.push(chunk_changes);
             }
         }
@@ -87,9 +87,15 @@ where
         evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
     ) -> Vec<ChunkStateChanges<State>> {
         storage
-            .all_chunks_iter()
-            .par_bridge()
-            .filter_map(|(coords, chunk)| evaluate_chunk(coords, chunk, evaluator))
+            .chunks()
+            .par_iter()
+            .enumerate()
+            .chunks(4)
+            .flat_map_iter(|chunks| {
+                chunks
+                    .into_iter()
+                    .filter_map(|(index, chunk)| evaluate_chunk(index, chunk, evaluator))
+            })
             .collect()
     }
 }
