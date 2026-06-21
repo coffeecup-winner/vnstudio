@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 
 use super::types::*;
 
@@ -11,15 +11,8 @@ const CHUNK_DEALLOCATION_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone)]
 pub struct Chunk<State: CellState> {
+    coords: (isize, isize),
     cells: [State; EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE],
-}
-
-impl<State: CellState> Default for Chunk<State> {
-    fn default() -> Self {
-        Self {
-            cells: [State::default(); EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE],
-        }
-    }
 }
 
 pub trait FillNeighborhood<State: CellState, Neighborhood: CellNeighborhood<State>> {
@@ -27,6 +20,13 @@ pub trait FillNeighborhood<State: CellState, Neighborhood: CellNeighborhood<Stat
 }
 
 impl<State: CellState> Chunk<State> {
+    fn new(coords: (isize, isize)) -> Self {
+        Self {
+            coords,
+            cells: [State::default(); EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE],
+        }
+    }
+
     #[inline]
     pub fn get_start_index(&self) -> usize {
         // Skip the top border and the left border of the first row
@@ -138,24 +138,26 @@ impl<State: CellState> FillNeighborhood<State, VonNeumannNeighborhood<State>> fo
 
 #[derive(Clone)]
 pub struct ChunkStorage<State: CellState> {
-    chunks: HashMap<(isize, isize), Chunk<State>>,
+    chunks_index: HashMap<(isize, isize), usize>,
+    chunks_: Vec<Chunk<State>>,
     cycles_since_chunk_deallocation: u64,
 }
 
 impl<State: CellState> ChunkStorage<State> {
     pub fn new() -> Self {
         Self {
-            chunks: HashMap::new(),
+            chunks_index: HashMap::new(),
+            chunks_: vec![],
             cycles_since_chunk_deallocation: 0,
         }
     }
 
-    pub fn all_chunks_iter(&self) -> hash_map::Iter<'_, (isize, isize), Chunk<State>> {
-        self.chunks.iter()
+    pub fn all_chunks_iter(&self) -> impl Iterator<Item = (&(isize, isize), &Chunk<State>)> {
+        self.chunks_.iter().map(|chunk| (&chunk.coords, chunk))
     }
 
     pub fn chunk_count(&self) -> usize {
-        self.chunks.len()
+        self.chunks_.len()
     }
 
     fn split_cell_coord(coord: isize) -> (isize, usize) {
@@ -168,11 +170,27 @@ impl<State: CellState> ChunkStorage<State> {
     pub fn get_state(&self, x: isize, y: isize) -> State {
         let (chunk_x, cell_x) = Self::split_cell_coord(x);
         let (chunk_y, cell_y) = Self::split_cell_coord(y);
-        if let Some(chunk) = self.chunks.get(&(chunk_x, chunk_y)) {
-            chunk.get_state(cell_x, cell_y)
-        } else {
-            State::default()
+        self.chunks_index
+            .get(&(chunk_x, chunk_y))
+            .map_or(State::default(), |&index| {
+                self.chunks_[index].get_state(cell_x, cell_y)
+            })
+    }
+
+    fn ensure_chunk(&mut self, coords: (isize, isize)) -> usize {
+        if let Some(&index) = self.chunks_index.get(&coords) {
+            return index;
         }
+
+        let index = self.chunks_.len();
+        self.chunks_.push(Chunk::new(coords));
+        self.chunks_index.insert(coords, index);
+        index
+    }
+
+    fn ensure_chunk_mut(&mut self, coords: (isize, isize)) -> &mut Chunk<State> {
+        let index = self.ensure_chunk(coords);
+        &mut self.chunks_[index]
     }
 
     pub fn visit_non_default_cells(
@@ -192,9 +210,10 @@ impl<State: CellState> ChunkStorage<State> {
 
         for chunk_y in min_chunk_y..=max_chunk_y {
             for chunk_x in min_chunk_x..=max_chunk_x {
-                let Some(chunk) = self.chunks.get(&(chunk_x, chunk_y)) else {
+                let Some(&chunk_index) = self.chunks_index.get(&(chunk_x, chunk_y)) else {
                     continue;
                 };
+                let chunk = &self.chunks_[chunk_index];
 
                 let world_min_x = chunk_x * CHUNK_SIZE as isize;
                 let world_min_y = chunk_y * CHUNK_SIZE as isize;
@@ -227,18 +246,13 @@ impl<State: CellState> ChunkStorage<State> {
         cell_y: usize,
         new_state: State,
     ) {
-        let chunk = match self.chunks.entry((chunk_x, chunk_y)) {
-            hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            hash_map::Entry::Vacant(entry) => {
-                // Don't allocate a new chunk if we're setting the cell to default state
-                if new_state == State::default() {
-                    return;
-                }
+        let coords = (chunk_x, chunk_y);
+        if !self.chunks_index.contains_key(&coords) && new_state == State::default() {
+            return;
+        }
 
-                entry.insert(Chunk::default())
-            }
-        };
-        chunk.set_state(cell_x, cell_y, new_state);
+        self.ensure_chunk_mut(coords)
+            .set_state(cell_x, cell_y, new_state);
         self.set_neighbor_borders(chunk_x, chunk_y, cell_x, cell_y, new_state);
     }
 
@@ -252,35 +266,35 @@ impl<State: CellState> ChunkStorage<State> {
     ) {
         // Set the external borders in neighboring chunks
         if cell_y == 0 {
-            let top_chunk = self.chunks.entry((chunk_x, chunk_y - 1)).or_default();
+            let top_chunk = self.ensure_chunk_mut((chunk_x, chunk_y - 1));
             top_chunk.set_bottom_border(cell_x, new_state);
 
             // TODO: Only do this for Moore?
             if cell_x == 0 {
-                let top_left_chunk = self.chunks.entry((chunk_x - 1, chunk_y - 1)).or_default();
+                let top_left_chunk = self.ensure_chunk_mut((chunk_x - 1, chunk_y - 1));
                 top_left_chunk.set_bottom_right_corner(new_state);
             } else if cell_x == CHUNK_SIZE - 1 {
-                let top_right_chunk = self.chunks.entry((chunk_x + 1, chunk_y - 1)).or_default();
+                let top_right_chunk = self.ensure_chunk_mut((chunk_x + 1, chunk_y - 1));
                 top_right_chunk.set_bottom_left_corner(new_state);
             }
         } else if cell_y == CHUNK_SIZE - 1 {
-            let bottom_chunk = self.chunks.entry((chunk_x, chunk_y + 1)).or_default();
+            let bottom_chunk = self.ensure_chunk_mut((chunk_x, chunk_y + 1));
             bottom_chunk.set_top_border(cell_x, new_state);
 
             // TODO: Only do this for Moore?
             if cell_x == 0 {
-                let bottom_left_chunk = self.chunks.entry((chunk_x - 1, chunk_y + 1)).or_default();
+                let bottom_left_chunk = self.ensure_chunk_mut((chunk_x - 1, chunk_y + 1));
                 bottom_left_chunk.set_top_right_corner(new_state);
             } else if cell_x == CHUNK_SIZE - 1 {
-                let bottom_right_chunk = self.chunks.entry((chunk_x + 1, chunk_y + 1)).or_default();
+                let bottom_right_chunk = self.ensure_chunk_mut((chunk_x + 1, chunk_y + 1));
                 bottom_right_chunk.set_top_left_corner(new_state);
             }
         }
         if cell_x == 0 {
-            let left_chunk = self.chunks.entry((chunk_x - 1, chunk_y)).or_default();
+            let left_chunk = self.ensure_chunk_mut((chunk_x - 1, chunk_y));
             left_chunk.set_right_border(cell_y, new_state);
         } else if cell_x == CHUNK_SIZE - 1 {
-            let right_chunk = self.chunks.entry((chunk_x + 1, chunk_y)).or_default();
+            let right_chunk = self.ensure_chunk_mut((chunk_x + 1, chunk_y));
             right_chunk.set_left_border(cell_y, new_state);
         }
     }
@@ -295,7 +309,7 @@ impl<State: CellState> ChunkStorage<State> {
         for chunk_changes in chunk_changes {
             let (chunk_x, chunk_y) = chunk_changes.chunk_coords;
             {
-                let chunk = self.chunks.entry((chunk_x, chunk_y)).or_default();
+                let chunk = self.ensure_chunk_mut((chunk_x, chunk_y));
                 for change in &chunk_changes.changes {
                     chunk.set_state(
                         change.cell_index_in_chunk.0,
@@ -318,10 +332,22 @@ impl<State: CellState> ChunkStorage<State> {
     }
 
     pub fn deallocate_default_chunks(&mut self) -> usize {
-        let old_chunk_count = self.chunks.len();
-        self.chunks
-            .retain(|_, chunk| chunk.cells.iter().any(|&s| s != State::default()));
-        old_chunk_count - self.chunks.len()
+        let old_chunk_count = self.chunks_.len();
+        self.chunks_
+            .retain(|chunk| chunk.cells.iter().any(|&s| s != State::default()));
+        let num_deallocated = old_chunk_count - self.chunks_.len();
+        if num_deallocated > 0 {
+            self.rebuild_chunks_index();
+        }
+        num_deallocated
+    }
+
+    fn rebuild_chunks_index(&mut self) {
+        self.chunks_index.clear();
+        self.chunks_index.reserve(self.chunks_.len());
+        for (index, chunk) in self.chunks_.iter().enumerate() {
+            self.chunks_index.insert(chunk.coords, index);
+        }
     }
 
     pub fn on_evaluate_next(&mut self) {
@@ -394,5 +420,20 @@ mod tests {
 
         storage.on_evaluate_next();
         assert_eq!(storage.chunk_count(), 0);
+    }
+
+    #[test]
+    fn rebuilds_chunk_indices_after_deallocation() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(1, 1, GameOfLifeState::Live);
+        storage.set_state(65, 1, GameOfLifeState::Live);
+        storage.set_state(1, 1, GameOfLifeState::Dead);
+
+        assert_eq!(storage.deallocate_default_chunks(), 1);
+        assert_eq!(storage.chunk_count(), 1);
+        assert_eq!(storage.get_state(65, 1), GameOfLifeState::Live);
+
+        storage.set_state(65, 1, GameOfLifeState::Dead);
+        assert_eq!(storage.get_state(65, 1), GameOfLifeState::Dead);
     }
 }
