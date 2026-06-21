@@ -21,6 +21,18 @@ where
     for y in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
             chunk.fill_neighborhood(index, &mut state, &mut neighborhood);
+
+            // Default states can never be changed by default neighbors
+            if state == State::default()
+                && neighborhood
+                    .neighbors()
+                    .iter()
+                    .all(|&n| n == State::default())
+            {
+                index += 1;
+                continue;
+            }
+
             let new_state = evaluator.evaluate(state, &neighborhood);
             if state != new_state {
                 changes.push(CellStateChange {
