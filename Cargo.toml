@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
 eframe = "0.32"
 libc = "0.2"
 num_enum = "0.7"

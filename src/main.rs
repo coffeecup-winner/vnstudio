@@ -89,6 +89,8 @@ where
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    return crate::core::cuda_evaluator::main();
+
     if let Some(path) = std::env::args().nth(1) {
         let pattern = golly_loader::load_jvn29_rle(PathBuf::from(path))?;
         let mut automaton = VonNeumann::new();
