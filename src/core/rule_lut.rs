@@ -12,12 +12,18 @@ pub struct RuleLUT<State: CellState, Neighborhood: CellNeighborhood<State>> {
 impl<State: CellState, Neighborhood: CellNeighborhood<State>> CellRuleEvaluator<State, Neighborhood>
     for RuleLUT<State, Neighborhood>
 {
+    #[inline(always)]
     fn evaluate(&self, state: State, neighbors: &Neighborhood) -> State {
-        self.lut[Self::to_index(state, neighbors)]
+        self.evaluate_direct(state, neighbors)
     }
 }
 
 impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Neighborhood> {
+    #[inline(always)]
+    pub fn evaluate_direct(&self, state: State, neighbors: &Neighborhood) -> State {
+        unsafe { *self.lut.get_unchecked(Self::to_index(state, neighbors)) }
+    }
+
     pub fn compute(evaluator: &dyn CellRuleEvaluator<State, Neighborhood>) -> Self {
         let num_states = State::COUNT;
         let num_bits_per_state = usize::BITS - (num_states - 1).leading_zeros();
@@ -48,6 +54,7 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
         }
     }
 
+    #[inline(always)]
     fn to_index(state: State, neighbors: &Neighborhood) -> usize {
         // If these are not made const by the compiler, it will be slow
         let num_states = State::COUNT;

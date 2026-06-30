@@ -138,11 +138,16 @@ pub struct ChunkStateChanges<State: CellState> {
     pub changes: Vec<CellStateChange<State>>,
 }
 
-pub trait CellGridEvaluator<State: CellState, Neighborhood: CellNeighborhood<State>> {
+pub trait CellGridEvaluator<
+    State: CellState,
+    Neighborhood: CellNeighborhood<State>,
+    Evaluator: CellRuleEvaluator<State, Neighborhood> + ?Sized,
+>
+{
     fn evaluate_all(
         &mut self,
         storage: &ChunkStorage<State>,
-        evaluator: &dyn CellRuleEvaluator<State, Neighborhood>,
+        evaluator: &Evaluator,
     ) -> Vec<ChunkStateChanges<State>>;
 }
 
@@ -162,8 +167,14 @@ pub struct CellularAutomatonOperationTimes {
 
 pub struct CellularAutomaton<Config: CellularAutomataConfig> {
     storage: ChunkStorage<Config::State>,
-    rule_evaluator: Box<dyn CellRuleEvaluator<Config::State, Config::Neighborhood>>,
-    grid_evaluator: Box<dyn CellGridEvaluator<Config::State, Config::Neighborhood>>,
+    rule_evaluator: RuleLUT<Config::State, Config::Neighborhood>,
+    grid_evaluator: Box<
+        dyn CellGridEvaluator<
+                Config::State,
+                Config::Neighborhood,
+                RuleLUT<Config::State, Config::Neighborhood>,
+            >,
+    >,
     operation_times: CellularAutomatonOperationTimes,
 }
 
@@ -172,14 +183,20 @@ where
     Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
 {
     pub fn new() -> Self {
-        let mut automaton = Self {
+        let start = std::time::Instant::now();
+        let rule_evaluator = RuleLUT::compute(&Config::Evaluator::default());
+        println!(
+            "LUT building for {} took {}ms",
+            Config::NAME,
+            start.elapsed().as_millis()
+        );
+
+        Self {
             storage: ChunkStorage::new(),
-            rule_evaluator: Box::new(Config::Evaluator::default()),
-            grid_evaluator: Box::new(ParallelEvaluator),
+            rule_evaluator,
+            grid_evaluator: Box::new(ParallelEvaluator::default()),
             operation_times: Default::default(),
-        };
-        automaton.switch_to_lut();
-        automaton
+        }
     }
 
     #[allow(dead_code)]
@@ -208,11 +225,10 @@ where
         self.storage.set_state(x, y, new_state);
     }
 
+    #[allow(dead_code)]
     pub fn switch_to_lut(&mut self) {
         let start = std::time::Instant::now();
-        self.rule_evaluator = Box::new(RuleLUT::<Config::State, Config::Neighborhood>::compute(
-            &*self.rule_evaluator,
-        ));
+        self.rule_evaluator = RuleLUT::compute(&Config::Evaluator::default());
         let end = std::time::Instant::now();
         println!(
             "LUT building for {} took {}ms",
@@ -225,7 +241,7 @@ where
         let t0 = std::time::Instant::now();
         let changes = self
             .grid_evaluator
-            .evaluate_all(&self.storage, &*self.rule_evaluator);
+            .evaluate_all(&self.storage, &self.rule_evaluator);
         let t1 = std::time::Instant::now();
         self.storage.apply_changes(&changes);
         let t2 = std::time::Instant::now();
