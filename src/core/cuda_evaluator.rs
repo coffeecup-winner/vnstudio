@@ -20,8 +20,8 @@ mod kernels {
         let cuda_thread_x = thread::threadIdx_x();
         let cuda_thread_y = thread::threadIdx_y();
 
-        let chunk_index = cuda_block_x % 4;
-        let chunk_idx_x = (cuda_block_x / 4) * 16 + cuda_thread_x;
+        let chunk_index = cuda_block_x / 4;
+        let chunk_idx_x = (cuda_block_x % 4) * 16 + cuda_thread_x;
         let chunk_idx_y = cuda_block_y * 16 + cuda_thread_y;
 
         let chunk_start_offset =
@@ -46,11 +46,11 @@ mod kernels {
 
         let mut lut_index = cell as usize;
         lut_index <<= 5;
+        lut_index |= top as usize;
+        lut_index <<= 5;
         lut_index |= left as usize;
         lut_index <<= 5;
         lut_index |= right as usize;
-        lut_index <<= 5;
-        lut_index |= top as usize;
         lut_index <<= 5;
         lut_index |= bottom as usize;
 
