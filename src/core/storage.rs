@@ -465,9 +465,10 @@ mod tests {
         let mut grid_evaluator = BasicEvaluator;
         let rule_evaluator = GameOfLifeEvaluator;
         storage.prepare_next_chunks();
+        let chunk_coords = storage.chunk_coords().to_vec();
         let (input, output) = storage.chunk_buffers();
         grid_evaluator
-            .evaluate_all(input, output, &rule_evaluator)
+            .evaluate_all(&chunk_coords, input, output, &rule_evaluator)
             .expect("basic evaluator should not fail");
         storage.commit_next_chunks();
         rebuild_halos(storage);

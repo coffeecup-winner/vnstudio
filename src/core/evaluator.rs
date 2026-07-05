@@ -216,6 +216,7 @@ where
 {
     fn evaluate_all(
         &mut self,
+        _chunk_coords: &[(isize, isize)],
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
@@ -325,6 +326,7 @@ where
 {
     fn evaluate_all(
         &mut self,
+        _chunk_coords: &[(isize, isize)],
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,

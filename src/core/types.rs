@@ -135,12 +135,17 @@ pub trait CellGridEvaluator<
 {
     fn evaluate_all(
         &mut self,
+        chunk_coords: &[(isize, isize)],
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
     ) -> Result<(), Box<dyn Error>>;
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>);
+
+    fn rebuild_all_halos_after_topology_change(&mut self, storage: &mut ChunkStorage<State>) {
+        self.rebuild_all_halos(storage);
+    }
 
     fn print_stats(&self) {}
 }
@@ -269,16 +274,18 @@ where
     pub fn evaluate_next(&mut self) {
         let t0 = std::time::Instant::now();
         self.storage.prepare_next_chunks();
+        let chunk_coords = self.storage.chunk_coords().to_vec();
         let (input, output) = self.storage.chunk_buffers();
         self.grid_evaluator
-            .evaluate_all(input, output, &self.rule_evaluator)
+            .evaluate_all(&chunk_coords, input, output, &self.rule_evaluator)
             .expect("failed to evaluate cellular automaton grid");
         let t1 = std::time::Instant::now();
         self.storage.commit_next_chunks();
         self.grid_evaluator.rebuild_all_halos(&mut self.storage);
         let t2 = std::time::Instant::now();
         if self.storage.on_evaluate_next() {
-            self.grid_evaluator.rebuild_all_halos(&mut self.storage);
+            self.grid_evaluator
+                .rebuild_all_halos_after_topology_change(&mut self.storage);
         }
         let t3 = std::time::Instant::now();
 
