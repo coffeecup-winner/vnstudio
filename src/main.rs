@@ -89,7 +89,9 @@ where
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if let Some(arg) = std::env::args().nth(1).as_ref() && arg == "--cuda" {
+    if let Some(arg) = std::env::args().nth(1).as_ref()
+        && arg == "--cuda"
+    {
         return crate::core::cuda_evaluator::main();
     }
 
