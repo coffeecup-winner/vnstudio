@@ -110,6 +110,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         unsafe {
             module.evaluate(&stream, launch_config, &lut_d, &chunk_d, &mut chunk_new_d)?;
         }
+        stream.synchronize()?;
     }
     let end = std::time::Instant::now();
     println!(
