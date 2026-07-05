@@ -55,6 +55,7 @@ where
     for _ in 0..1000 {
         automaton.evaluate_next();
     }
+    automaton.reset_benchmark_stats();
     println!("Starting the benchmark");
     let start = std::time::Instant::now();
     for _ in 0..10000 {

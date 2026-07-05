@@ -156,6 +156,8 @@ pub trait CellGridEvaluator<
 
     fn storage_changed(&mut self) {}
 
+    fn reset_stats(&mut self) {}
+
     fn print_stats(&self) {}
 }
 
@@ -260,6 +262,11 @@ where
 
     pub fn operation_times(&self) -> &CellularAutomatonOperationTimes {
         &self.operation_times
+    }
+
+    pub fn reset_benchmark_stats(&mut self) {
+        self.operation_times = Default::default();
+        self.grid_evaluator.reset_stats();
     }
 
     pub fn print_evaluator_stats(&self) {

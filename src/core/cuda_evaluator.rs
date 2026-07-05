@@ -14,7 +14,7 @@ use cuda_core::{
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::{EmbeddedModuleError, cuda_module, load_kernel_module};
 
-use std::{collections::HashMap, error::Error, io, sync::Arc, time::Duration};
+use std::{collections::HashMap, error::Error, io, mem, sync::Arc, time::Duration};
 
 // Size of the chunk with the external borders
 const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
@@ -136,13 +136,45 @@ pub struct CudaEvaluator<State: CellState> {
 
 #[derive(Default)]
 struct CudaEvaluatorStats {
-    total_memcopy_in: Duration,
+    chunk_current_upload: TransferStats,
+    chunk_next_upload: TransferStats,
+    halo_ops_upload: TransferStats,
     total_kernel_evaluate: Duration,
     total_halo_rebuild: Duration,
-    total_topology_flag_copy: Duration,
-    total_memcopy_out: Duration,
+    topology_flag_copy: TransferStats,
+    host_sync_download: TransferStats,
+    fallback_output_download: TransferStats,
+    device_invalidations: u64,
     fast_path_iterations: u64,
     fallback_iterations: u64,
+}
+
+#[derive(Default)]
+struct TransferStats {
+    time: Duration,
+    count: u64,
+    bytes: usize,
+}
+
+impl TransferStats {
+    fn record(&mut self, time: Duration, bytes: usize) {
+        self.time += time;
+        self.count += 1;
+        self.bytes += bytes;
+    }
+}
+
+fn bytes_of_slice<T>(slice: &[T]) -> usize {
+    mem::size_of_val(slice)
+}
+
+fn print_transfer_stats(label: &str, stats: &TransferStats) {
+    println!(
+        "{label}: {}ms, {} transfers, {} bytes",
+        stats.time.as_millis(),
+        stats.count,
+        stats.bytes
+    );
 }
 
 enum LoadedCudaModule {
@@ -388,7 +420,9 @@ where
             let t_flag = std::time::Instant::now();
             self.topology_changed_d
                 .copy_to_host(&self.stream, &mut topology_changed)?;
-            self.stats.total_topology_flag_copy += t_flag.elapsed();
+            self.stats
+                .topology_flag_copy
+                .record(t_flag.elapsed(), bytes_of_slice(&topology_changed));
 
             self.last_halo_rebuild_on_device = topology_changed[0] == 0;
         }
@@ -407,7 +441,9 @@ where
             let output_flat = flatten_chunk_cells_mut(output);
             let t_memcopy_out = std::time::Instant::now();
             chunk_new_d.copy_to_host(&self.stream, output_flat)?;
-            self.stats.total_memcopy_out += t_memcopy_out.elapsed();
+            self.stats
+                .fallback_output_download
+                .record(t_memcopy_out.elapsed(), bytes_of_slice(output_flat));
             self.device_next = Some(chunk_new_d);
             self.invalidate_device_state();
             self.host_synced = true;
@@ -445,8 +481,11 @@ where
         };
 
         let t_memcopy_out = std::time::Instant::now();
-        device_current.copy_to_host(&self.stream, storage.active_cells_flat_mut())?;
-        self.stats.total_memcopy_out += t_memcopy_out.elapsed();
+        let output_flat = storage.active_cells_flat_mut();
+        device_current.copy_to_host(&self.stream, output_flat)?;
+        self.stats
+            .host_sync_download
+            .record(t_memcopy_out.elapsed(), bytes_of_slice(output_flat));
         self.host_synced = true;
 
         Ok(())
@@ -456,12 +495,22 @@ where
         self.invalidate_device_state();
     }
 
+    fn reset_stats(&mut self) {
+        self.stats = Default::default();
+    }
+
     fn print_stats(&self) {
+        let total_memcopy_in = self.stats.chunk_current_upload.time
+            + self.stats.chunk_next_upload.time
+            + self.stats.halo_ops_upload.time;
+        let total_memcopy_out =
+            self.stats.host_sync_download.time + self.stats.fallback_output_download.time;
+
         println!("CUDA evaluator stats:");
-        println!(
-            "Total memcpy in: {}ms",
-            self.stats.total_memcopy_in.as_millis()
-        );
+        println!("Total memcpy in: {}ms", total_memcopy_in.as_millis());
+        print_transfer_stats("  current chunk uploads", &self.stats.chunk_current_upload);
+        print_transfer_stats("  next chunk uploads", &self.stats.chunk_next_upload);
+        print_transfer_stats("  halo op uploads", &self.stats.halo_ops_upload);
         println!(
             "Total kernel evaluation: {}ms",
             self.stats.total_kernel_evaluate.as_millis()
@@ -472,12 +521,16 @@ where
         );
         println!(
             "Total topology flag copy: {}ms",
-            self.stats.total_topology_flag_copy.as_millis()
+            self.stats.topology_flag_copy.time.as_millis()
         );
-        println!(
-            "Total memcpy out: {}ms",
-            self.stats.total_memcopy_out.as_millis()
+        print_transfer_stats("  topology flag copies", &self.stats.topology_flag_copy);
+        println!("Total memcpy out: {}ms", total_memcopy_out.as_millis());
+        print_transfer_stats("  host sync downloads", &self.stats.host_sync_download);
+        print_transfer_stats(
+            "  fallback output downloads",
+            &self.stats.fallback_output_download,
         );
+        println!("Device invalidations: {}", self.stats.device_invalidations);
         println!("Fast path iterations: {}", self.stats.fast_path_iterations);
         println!("Fallback iterations: {}", self.stats.fallback_iterations);
     }
@@ -485,6 +538,7 @@ where
 
 impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
     fn invalidate_device_state(&mut self) {
+        self.stats.device_invalidations += 1;
         self.device_current = None;
         self.device_next = None;
         self.halo_ops_d = None;
@@ -513,19 +567,32 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
             return Ok(());
         }
 
-        let t_memcopy_in = std::time::Instant::now();
         let input_flat = flatten_chunk_cells(input);
         let output_flat = flatten_chunk_cells(output);
         let halo_ops = build_halo_ops(chunk_coords);
 
+        let t_current_upload = std::time::Instant::now();
         self.device_current = Some(DeviceBuffer::from_host(&self.stream, input_flat)?);
+        self.stats
+            .chunk_current_upload
+            .record(t_current_upload.elapsed(), bytes_of_slice(input_flat));
+
+        let t_next_upload = std::time::Instant::now();
         self.device_next = Some(DeviceBuffer::from_host(&self.stream, output_flat)?);
+        self.stats
+            .chunk_next_upload
+            .record(t_next_upload.elapsed(), bytes_of_slice(output_flat));
+
+        let t_halo_ops_upload = std::time::Instant::now();
         self.halo_ops_d = Some(DeviceBuffer::from_host(&self.stream, &halo_ops)?);
+        self.stats
+            .halo_ops_upload
+            .record(t_halo_ops_upload.elapsed(), bytes_of_slice(&halo_ops));
+
         self.device_topology.clear();
         self.device_topology.extend_from_slice(chunk_coords);
         self.device_chunk_count = input.len();
         self.host_synced = true;
-        self.stats.total_memcopy_in += t_memcopy_in.elapsed();
 
         Ok(())
     }
