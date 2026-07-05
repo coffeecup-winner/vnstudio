@@ -120,9 +120,8 @@ pub(crate) fn clear_halo<State: CellState>(chunk: &mut Chunk<State>) {
     set_bottom_right_corner(chunk, State::default());
 }
 
-fn has_non_default_interior<State: CellState>(chunk: &Chunk<State>) -> bool {
-    (0..CHUNK_SIZE)
-        .any(|y| (0..CHUNK_SIZE).any(|x| get_interior_state(chunk, x, y) != State::default()))
+fn has_non_default_cell<State: CellState>(chunk: &Chunk<State>) -> bool {
+    chunk.iter().any(|&cell| cell != State::default())
 }
 
 impl<State: CellState> FillNeighborhood<State, MooreNeighborhood<State>> for Chunk<State> {
@@ -388,7 +387,7 @@ impl<State: CellState> ChunkStorage<State> {
         let old_chunk_count = self.chunks.len();
         let mut old_coords = std::mem::take(&mut self.chunk_coords).into_iter();
         self.chunks.retain(|chunk| {
-            let keep = has_non_default_interior(chunk);
+            let keep = has_non_default_cell(chunk);
             let coords = old_coords
                 .next()
                 .expect("chunk coordinate count must match chunk cell count");
@@ -697,14 +696,25 @@ mod tests {
     }
 
     #[test]
-    fn deallocates_halo_only_chunks() {
+    fn retains_halo_only_chunks_with_non_default_halos() {
         let mut storage = ChunkStorage::<GameOfLifeState>::new();
         storage.set_state(0, 0, GameOfLifeState::Live);
 
         assert_eq!(storage.chunks().len(), 4);
-        assert_eq!(storage.deallocate_default_chunks(), 3);
-        assert_eq!(storage.chunks().len(), 1);
+        assert_eq!(storage.deallocate_default_chunks(), 0);
+        assert_eq!(storage.chunks().len(), 4);
         assert_eq!(storage.get_state(0, 0), GameOfLifeState::Live);
+    }
+
+    #[test]
+    fn deallocates_halo_chunks_after_their_halos_are_defaulted() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(0, 0, GameOfLifeState::Live);
+        storage.set_state(0, 0, GameOfLifeState::Dead);
+
+        assert_eq!(storage.chunks().len(), 4);
+        assert_eq!(storage.deallocate_default_chunks(), 4);
+        assert_eq!(storage.chunks().len(), 0);
     }
 
     #[test]
