@@ -49,6 +49,161 @@ fn evaluate_chunk<
     }
 }
 
+pub(crate) fn rebuild_all_halos_for_storage<State: CellState>(storage: &mut ChunkStorage<State>) {
+    for chunk in storage.chunks_mut() {
+        clear_halo(chunk);
+    }
+
+    let mut updates = Vec::new();
+    for (&coords, chunk) in storage.chunk_coords().iter().zip(storage.chunks()) {
+        let (chunk_x, chunk_y) = coords;
+
+        for x in 0..CHUNK_SIZE {
+            let top = get_interior_state(chunk, x, 0);
+            if top != State::default() {
+                updates.push(BorderUpdate::Bottom {
+                    coords: (chunk_x, chunk_y - 1),
+                    index: x,
+                    state: top,
+                });
+            }
+
+            let bottom = get_interior_state(chunk, x, CHUNK_SIZE - 1);
+            if bottom != State::default() {
+                updates.push(BorderUpdate::Top {
+                    coords: (chunk_x, chunk_y + 1),
+                    index: x,
+                    state: bottom,
+                });
+            }
+        }
+
+        for y in 0..CHUNK_SIZE {
+            let left = get_interior_state(chunk, 0, y);
+            if left != State::default() {
+                updates.push(BorderUpdate::Right {
+                    coords: (chunk_x - 1, chunk_y),
+                    index: y,
+                    state: left,
+                });
+            }
+
+            let right = get_interior_state(chunk, CHUNK_SIZE - 1, y);
+            if right != State::default() {
+                updates.push(BorderUpdate::Left {
+                    coords: (chunk_x + 1, chunk_y),
+                    index: y,
+                    state: right,
+                });
+            }
+        }
+
+        let top_left = get_interior_state(chunk, 0, 0);
+        if top_left != State::default() {
+            updates.push(BorderUpdate::BottomRight {
+                coords: (chunk_x - 1, chunk_y - 1),
+                state: top_left,
+            });
+        }
+
+        let top_right = get_interior_state(chunk, CHUNK_SIZE - 1, 0);
+        if top_right != State::default() {
+            updates.push(BorderUpdate::BottomLeft {
+                coords: (chunk_x + 1, chunk_y - 1),
+                state: top_right,
+            });
+        }
+
+        let bottom_left = get_interior_state(chunk, 0, CHUNK_SIZE - 1);
+        if bottom_left != State::default() {
+            updates.push(BorderUpdate::TopRight {
+                coords: (chunk_x - 1, chunk_y + 1),
+                state: bottom_left,
+            });
+        }
+
+        let bottom_right = get_interior_state(chunk, CHUNK_SIZE - 1, CHUNK_SIZE - 1);
+        if bottom_right != State::default() {
+            updates.push(BorderUpdate::TopLeft {
+                coords: (chunk_x + 1, chunk_y + 1),
+                state: bottom_right,
+            });
+        }
+    }
+
+    for update in updates {
+        let chunk = storage.ensure_chunk_mut(update.coords());
+        update.apply(chunk);
+    }
+}
+
+enum BorderUpdate<State: CellState> {
+    Top {
+        coords: (isize, isize),
+        index: usize,
+        state: State,
+    },
+    Bottom {
+        coords: (isize, isize),
+        index: usize,
+        state: State,
+    },
+    Left {
+        coords: (isize, isize),
+        index: usize,
+        state: State,
+    },
+    Right {
+        coords: (isize, isize),
+        index: usize,
+        state: State,
+    },
+    TopLeft {
+        coords: (isize, isize),
+        state: State,
+    },
+    TopRight {
+        coords: (isize, isize),
+        state: State,
+    },
+    BottomLeft {
+        coords: (isize, isize),
+        state: State,
+    },
+    BottomRight {
+        coords: (isize, isize),
+        state: State,
+    },
+}
+
+impl<State: CellState> BorderUpdate<State> {
+    fn coords(&self) -> (isize, isize) {
+        match *self {
+            BorderUpdate::Top { coords, .. }
+            | BorderUpdate::Bottom { coords, .. }
+            | BorderUpdate::Left { coords, .. }
+            | BorderUpdate::Right { coords, .. }
+            | BorderUpdate::TopLeft { coords, .. }
+            | BorderUpdate::TopRight { coords, .. }
+            | BorderUpdate::BottomLeft { coords, .. }
+            | BorderUpdate::BottomRight { coords, .. } => coords,
+        }
+    }
+
+    fn apply(self, chunk: &mut Chunk<State>) {
+        match self {
+            BorderUpdate::Top { index, state, .. } => set_top_border(chunk, index, state),
+            BorderUpdate::Bottom { index, state, .. } => set_bottom_border(chunk, index, state),
+            BorderUpdate::Left { index, state, .. } => set_left_border(chunk, index, state),
+            BorderUpdate::Right { index, state, .. } => set_right_border(chunk, index, state),
+            BorderUpdate::TopLeft { state, .. } => set_top_left_corner(chunk, state),
+            BorderUpdate::TopRight { state, .. } => set_top_right_corner(chunk, state),
+            BorderUpdate::BottomLeft { state, .. } => set_bottom_left_corner(chunk, state),
+            BorderUpdate::BottomRight { state, .. } => set_bottom_right_corner(chunk, state),
+        }
+    }
+}
+
 impl<
     State: CellState,
     Neighborhood: CellNeighborhood<State>,
@@ -69,6 +224,10 @@ where
         for (chunk, output) in input.iter().zip(output) {
             evaluate_chunk(chunk, output, evaluator);
         }
+    }
+
+    fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
+        rebuild_all_halos_for_storage(storage);
     }
 }
 
@@ -182,5 +341,9 @@ where
                     }
                 })
         });
+    }
+
+    fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
+        rebuild_all_halos_for_storage(storage);
     }
 }

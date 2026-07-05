@@ -139,6 +139,8 @@ pub trait CellGridEvaluator<
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
     );
+
+    fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>);
 }
 
 pub trait CellularAutomataConfig {
@@ -235,8 +237,11 @@ where
             .evaluate_all(input, coords, output, &self.rule_evaluator);
         let t1 = std::time::Instant::now();
         self.storage.commit_next_chunks();
+        self.grid_evaluator.rebuild_all_halos(&mut self.storage);
         let t2 = std::time::Instant::now();
-        self.storage.on_evaluate_next();
+        if self.storage.on_evaluate_next() {
+            self.grid_evaluator.rebuild_all_halos(&mut self.storage);
+        }
         let t3 = std::time::Instant::now();
 
         self.operation_times.total_grid_evaluate += t1 - t0;

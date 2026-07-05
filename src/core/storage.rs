@@ -28,11 +28,7 @@ pub fn interior_cell_index(x: usize, y: usize) -> usize {
 }
 
 #[inline]
-pub fn get_interior_state<State: CellState>(
-    chunk: &Chunk<State>,
-    x: usize,
-    y: usize,
-) -> State {
+pub fn get_interior_state<State: CellState>(chunk: &Chunk<State>, x: usize, y: usize) -> State {
     chunk[interior_cell_index(x, y)]
 }
 
@@ -47,42 +43,61 @@ pub fn set_interior_state<State: CellState>(
 }
 
 #[inline]
-fn set_top_border<State: CellState>(chunk: &mut Chunk<State>, x: usize, new_state: State) {
+pub(crate) fn set_top_border<State: CellState>(
+    chunk: &mut Chunk<State>,
+    x: usize,
+    new_state: State,
+) {
     chunk[x + 1] = new_state;
 }
 
 #[inline]
-fn set_bottom_border<State: CellState>(chunk: &mut Chunk<State>, x: usize, new_state: State) {
+pub(crate) fn set_bottom_border<State: CellState>(
+    chunk: &mut Chunk<State>,
+    x: usize,
+    new_state: State,
+) {
     chunk[EXTENDED_CHUNK_SIZE * (EXTENDED_CHUNK_SIZE - 1) + x + 1] = new_state;
 }
 
 #[inline]
-fn set_left_border<State: CellState>(chunk: &mut Chunk<State>, y: usize, new_state: State) {
+pub(crate) fn set_left_border<State: CellState>(
+    chunk: &mut Chunk<State>,
+    y: usize,
+    new_state: State,
+) {
     chunk[EXTENDED_CHUNK_SIZE * (y + 1)] = new_state;
 }
 
 #[inline]
-fn set_right_border<State: CellState>(chunk: &mut Chunk<State>, y: usize, new_state: State) {
+pub(crate) fn set_right_border<State: CellState>(
+    chunk: &mut Chunk<State>,
+    y: usize,
+    new_state: State,
+) {
     chunk[EXTENDED_CHUNK_SIZE * (y + 1) + EXTENDED_CHUNK_SIZE - 1] = new_state;
 }
 
 #[inline]
-fn set_top_left_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
+pub(crate) fn set_top_left_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
     chunk[0] = new_state;
 }
 
 #[inline]
-fn set_top_right_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
+pub(crate) fn set_top_right_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
     chunk[EXTENDED_CHUNK_SIZE - 1] = new_state;
 }
 
 #[inline]
-fn set_bottom_left_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
+pub(crate) fn set_bottom_left_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
     chunk[EXTENDED_CHUNK_SIZE * (EXTENDED_CHUNK_SIZE - 1)] = new_state;
 }
 
 #[inline]
-fn set_bottom_right_corner<State: CellState>(chunk: &mut Chunk<State>, new_state: State) {
+pub(crate) fn set_bottom_right_corner<State: CellState>(
+    chunk: &mut Chunk<State>,
+    new_state: State,
+) {
     chunk[EXTENDED_CHUNK_CELLS - 1] = new_state;
 }
 
@@ -90,7 +105,7 @@ fn new_chunk_cells<State: CellState>() -> Chunk<State> {
     [State::default(); EXTENDED_CHUNK_CELLS]
 }
 
-fn clear_halo<State: CellState>(chunk: &mut Chunk<State>) {
+pub(crate) fn clear_halo<State: CellState>(chunk: &mut Chunk<State>) {
     for x in 0..CHUNK_SIZE {
         set_top_border(chunk, x, State::default());
         set_bottom_border(chunk, x, State::default());
@@ -134,9 +149,7 @@ impl<State: CellState> FillNeighborhood<State, MooreNeighborhood<State>> for Chu
     }
 }
 
-impl<State: CellState> FillNeighborhood<State, VonNeumannNeighborhood<State>>
-    for Chunk<State>
-{
+impl<State: CellState> FillNeighborhood<State, VonNeumannNeighborhood<State>> for Chunk<State> {
     #[inline]
     fn fill_neighborhood(
         &self,
@@ -184,6 +197,10 @@ impl<State: CellState> ChunkStorage<State> {
         &self.chunks
     }
 
+    pub(crate) fn chunks_mut(&mut self) -> &mut [Chunk<State>] {
+        &mut self.chunks
+    }
+
     #[allow(dead_code)]
     pub fn chunk_coords(&self) -> &[(isize, isize)] {
         &self.chunk_coords
@@ -208,13 +225,7 @@ impl<State: CellState> ChunkStorage<State> {
         self.next_chunk_coords.extend_from_slice(&self.chunk_coords);
     }
 
-    pub fn chunk_buffers(
-        &mut self,
-    ) -> (
-        &[Chunk<State>],
-        &[(isize, isize)],
-        &mut [Chunk<State>],
-    ) {
+    pub fn chunk_buffers(&mut self) -> (&[Chunk<State>], &[(isize, isize)], &mut [Chunk<State>]) {
         (&self.chunks, &self.chunk_coords, &mut self.next_chunks)
     }
 
@@ -222,7 +233,6 @@ impl<State: CellState> ChunkStorage<State> {
         std::mem::swap(&mut self.chunks, &mut self.next_chunks);
         std::mem::swap(&mut self.chunk_coords, &mut self.next_chunk_coords);
         self.rebuild_chunks_index();
-        self.rebuild_all_halos();
     }
 
     fn split_cell_coord(coord: isize) -> (isize, usize) {
@@ -254,7 +264,7 @@ impl<State: CellState> ChunkStorage<State> {
         index
     }
 
-    fn ensure_chunk_mut(&mut self, coords: (isize, isize)) -> &mut Chunk<State> {
+    pub(crate) fn ensure_chunk_mut(&mut self, coords: (isize, isize)) -> &mut Chunk<State> {
         let index = self.ensure_chunk(coords);
         &mut self.chunks[index]
     }
@@ -392,94 +402,6 @@ impl<State: CellState> ChunkStorage<State> {
         num_deallocated
     }
 
-    fn rebuild_all_halos(&mut self) {
-        for chunk in &mut self.chunks {
-            clear_halo(chunk);
-        }
-
-        let mut updates = Vec::new();
-        for (&coords, chunk) in self.chunk_coords.iter().zip(&self.chunks) {
-            let (chunk_x, chunk_y) = coords;
-
-            for x in 0..CHUNK_SIZE {
-                let top = get_interior_state(chunk, x, 0);
-                if top != State::default() {
-                    updates.push(BorderUpdate::Bottom {
-                        coords: (chunk_x, chunk_y - 1),
-                        index: x,
-                        state: top,
-                    });
-                }
-
-                let bottom = get_interior_state(chunk, x, CHUNK_SIZE - 1);
-                if bottom != State::default() {
-                    updates.push(BorderUpdate::Top {
-                        coords: (chunk_x, chunk_y + 1),
-                        index: x,
-                        state: bottom,
-                    });
-                }
-            }
-
-            for y in 0..CHUNK_SIZE {
-                let left = get_interior_state(chunk, 0, y);
-                if left != State::default() {
-                    updates.push(BorderUpdate::Right {
-                        coords: (chunk_x - 1, chunk_y),
-                        index: y,
-                        state: left,
-                    });
-                }
-
-                let right = get_interior_state(chunk, CHUNK_SIZE - 1, y);
-                if right != State::default() {
-                    updates.push(BorderUpdate::Left {
-                        coords: (chunk_x + 1, chunk_y),
-                        index: y,
-                        state: right,
-                    });
-                }
-            }
-
-            let top_left = get_interior_state(chunk, 0, 0);
-            if top_left != State::default() {
-                updates.push(BorderUpdate::BottomRight {
-                    coords: (chunk_x - 1, chunk_y - 1),
-                    state: top_left,
-                });
-            }
-
-            let top_right = get_interior_state(chunk, CHUNK_SIZE - 1, 0);
-            if top_right != State::default() {
-                updates.push(BorderUpdate::BottomLeft {
-                    coords: (chunk_x + 1, chunk_y - 1),
-                    state: top_right,
-                });
-            }
-
-            let bottom_left = get_interior_state(chunk, 0, CHUNK_SIZE - 1);
-            if bottom_left != State::default() {
-                updates.push(BorderUpdate::TopRight {
-                    coords: (chunk_x - 1, chunk_y + 1),
-                    state: bottom_left,
-                });
-            }
-
-            let bottom_right = get_interior_state(chunk, CHUNK_SIZE - 1, CHUNK_SIZE - 1);
-            if bottom_right != State::default() {
-                updates.push(BorderUpdate::TopLeft {
-                    coords: (chunk_x + 1, chunk_y + 1),
-                    state: bottom_right,
-                });
-            }
-        }
-
-        for update in updates {
-            let chunk = self.ensure_chunk_mut(update.coords());
-            update.apply(chunk);
-        }
-    }
-
     fn rebuild_chunks_index(&mut self) {
         self.chunks_index.clear();
         self.chunks_index.reserve(self.chunk_coords.len());
@@ -488,14 +410,14 @@ impl<State: CellState> ChunkStorage<State> {
         }
     }
 
-    pub fn on_evaluate_next(&mut self) {
+    pub fn on_evaluate_next(&mut self) -> bool {
         self.cycles_since_chunk_deallocation += 1;
         if self.cycles_since_chunk_deallocation >= CHUNK_DEALLOCATION_INTERVAL {
-            if self.deallocate_default_chunks() > 0 {
-                self.rebuild_all_halos();
-            }
+            let deallocated = self.deallocate_default_chunks() > 0;
             self.cycles_since_chunk_deallocation = 0;
+            return deallocated;
         }
+        false
     }
 }
 
@@ -519,80 +441,23 @@ fn flatten_chunk_cells_mut<State: CellState>(chunks: &mut [Chunk<State>]) -> &mu
     unsafe { std::slice::from_raw_parts_mut(ptr, len) }
 }
 
-enum BorderUpdate<State: CellState> {
-    Top {
-        coords: (isize, isize),
-        index: usize,
-        state: State,
-    },
-    Bottom {
-        coords: (isize, isize),
-        index: usize,
-        state: State,
-    },
-    Left {
-        coords: (isize, isize),
-        index: usize,
-        state: State,
-    },
-    Right {
-        coords: (isize, isize),
-        index: usize,
-        state: State,
-    },
-    TopLeft {
-        coords: (isize, isize),
-        state: State,
-    },
-    TopRight {
-        coords: (isize, isize),
-        state: State,
-    },
-    BottomLeft {
-        coords: (isize, isize),
-        state: State,
-    },
-    BottomRight {
-        coords: (isize, isize),
-        state: State,
-    },
-}
-
-impl<State: CellState> BorderUpdate<State> {
-    fn coords(&self) -> (isize, isize) {
-        match *self {
-            BorderUpdate::Top { coords, .. }
-            | BorderUpdate::Bottom { coords, .. }
-            | BorderUpdate::Left { coords, .. }
-            | BorderUpdate::Right { coords, .. }
-            | BorderUpdate::TopLeft { coords, .. }
-            | BorderUpdate::TopRight { coords, .. }
-            | BorderUpdate::BottomLeft { coords, .. }
-            | BorderUpdate::BottomRight { coords, .. } => coords,
-        }
-    }
-
-    fn apply(self, chunk: &mut Chunk<State>) {
-        match self {
-            BorderUpdate::Top { index, state, .. } => set_top_border(chunk, index, state),
-            BorderUpdate::Bottom { index, state, .. } => set_bottom_border(chunk, index, state),
-            BorderUpdate::Left { index, state, .. } => set_left_border(chunk, index, state),
-            BorderUpdate::Right { index, state, .. } => set_right_border(chunk, index, state),
-            BorderUpdate::TopLeft { state, .. } => set_top_left_corner(chunk, state),
-            BorderUpdate::TopRight { state, .. } => set_top_right_corner(chunk, state),
-            BorderUpdate::BottomLeft { state, .. } => set_bottom_left_corner(chunk, state),
-            BorderUpdate::BottomRight { state, .. } => set_bottom_right_corner(chunk, state),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         automata::game_of_life::{GameOfLifeEvaluator, GameOfLifeState},
         core::evaluator::BasicEvaluator,
+        core::types::{CellGridEvaluator, MooreNeighborhood},
     };
+
+    fn rebuild_halos(storage: &mut ChunkStorage<GameOfLifeState>) {
+        let mut grid_evaluator = BasicEvaluator;
+        <BasicEvaluator as CellGridEvaluator<
+            GameOfLifeState,
+            MooreNeighborhood<GameOfLifeState>,
+            GameOfLifeEvaluator,
+        >>::rebuild_all_halos(&mut grid_evaluator, storage);
+    }
 
     fn evaluate_once(storage: &mut ChunkStorage<GameOfLifeState>) {
         let mut grid_evaluator = BasicEvaluator;
@@ -601,6 +466,7 @@ mod tests {
         let (input, coords, output) = storage.chunk_buffers();
         grid_evaluator.evaluate_all(input, coords, output, &rule_evaluator);
         storage.commit_next_chunks();
+        rebuild_halos(storage);
     }
 
     #[test]
@@ -764,7 +630,7 @@ mod tests {
             GameOfLifeState::Live,
         );
 
-        storage.rebuild_all_halos();
+        rebuild_halos(&mut storage);
 
         let top = storage.chunks_index[&(0, -1)];
         let bottom = storage.chunks_index[&(0, 1)];
@@ -809,7 +675,7 @@ mod tests {
         storage.ensure_chunk((0, 0));
         set_interior_state(&mut storage.chunks[0], 0, 0, GameOfLifeState::Live);
 
-        storage.rebuild_all_halos();
+        rebuild_halos(&mut storage);
 
         assert!(storage.chunks_index.contains_key(&(0, 0)));
         assert!(storage.chunks_index.contains_key(&(0, -1)));

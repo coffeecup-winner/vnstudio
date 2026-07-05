@@ -1,5 +1,6 @@
 use crate::core::{
-    storage::{CHUNK_SIZE, Chunk, FillNeighborhood},
+    evaluator::rebuild_all_halos_for_storage,
+    storage::{CHUNK_SIZE, Chunk, ChunkStorage, FillNeighborhood},
     types::{CellGridEvaluator, CellNeighborhood, CellRuleEvaluator, CellState},
 };
 
@@ -82,6 +83,10 @@ where
         _evaluator: &Evaluator,
     ) {
         todo!()
+    }
+
+    fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
+        rebuild_all_halos_for_storage(storage);
     }
 }
 
