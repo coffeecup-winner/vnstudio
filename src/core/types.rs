@@ -147,6 +147,15 @@ pub trait CellGridEvaluator<
         self.rebuild_all_halos(storage);
     }
 
+    fn sync_to_host_if_needed(
+        &mut self,
+        _storage: &mut ChunkStorage<State>,
+    ) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    fn storage_changed(&mut self) {}
+
     fn print_stats(&self) {}
 }
 
@@ -230,16 +239,22 @@ where
     }
 
     #[allow(dead_code)]
-    pub fn get_state(&self, x: isize, y: isize) -> Config::State {
+    pub fn get_state(&mut self, x: isize, y: isize) -> Config::State {
+        self.grid_evaluator
+            .sync_to_host_if_needed(&mut self.storage)
+            .expect("failed to synchronize cellular automaton storage");
         self.storage.get_state(x, y)
     }
 
     pub fn visit_non_default_cells(
-        &self,
+        &mut self,
         min: (isize, isize),
         max: (isize, isize),
         visitor: impl FnMut(isize, isize, Config::State),
     ) {
+        self.grid_evaluator
+            .sync_to_host_if_needed(&mut self.storage)
+            .expect("failed to synchronize cellular automaton storage");
         self.storage.visit_non_default_cells(min, max, visitor);
     }
 
@@ -251,12 +266,19 @@ where
         self.grid_evaluator.print_stats();
     }
 
-    pub fn chunk_count(&self) -> usize {
+    pub fn chunk_count(&mut self) -> usize {
+        self.grid_evaluator
+            .sync_to_host_if_needed(&mut self.storage)
+            .expect("failed to synchronize cellular automaton storage");
         self.storage.chunks().len()
     }
 
     pub fn set_state(&mut self, x: isize, y: isize, new_state: Config::State) {
+        self.grid_evaluator
+            .sync_to_host_if_needed(&mut self.storage)
+            .expect("failed to synchronize cellular automaton storage");
         self.storage.set_state(x, y, new_state);
+        self.grid_evaluator.storage_changed();
     }
 
     #[allow(dead_code)]
@@ -283,6 +305,11 @@ where
         self.storage.commit_next_chunks();
         self.grid_evaluator.rebuild_all_halos(&mut self.storage);
         let t2 = std::time::Instant::now();
+        if self.storage.should_deallocate_next() {
+            self.grid_evaluator
+                .sync_to_host_if_needed(&mut self.storage)
+                .expect("failed to synchronize cellular automaton storage before deallocation");
+        }
         if self.storage.on_evaluate_next() {
             self.grid_evaluator
                 .rebuild_all_halos_after_topology_change(&mut self.storage);

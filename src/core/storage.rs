@@ -211,6 +211,10 @@ impl<State: CellState> ChunkStorage<State> {
         flatten_chunk_cells(&self.chunks)
     }
 
+    pub(crate) fn active_cells_flat_mut(&mut self) -> &mut [State] {
+        flatten_chunk_cells_mut(&mut self.chunks)
+    }
+
     #[allow(dead_code)]
     pub fn next_cells_flat_mut(&mut self) -> &mut [State] {
         flatten_chunk_cells_mut(&mut self.next_chunks)
@@ -418,6 +422,10 @@ impl<State: CellState> ChunkStorage<State> {
             return deallocated;
         }
         false
+    }
+
+    pub fn should_deallocate_next(&self) -> bool {
+        self.cycles_since_chunk_deallocation + 1 >= CHUNK_DEALLOCATION_INTERVAL
     }
 }
 

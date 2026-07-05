@@ -154,7 +154,13 @@ pub struct CudaEvaluator<State: CellState> {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     module: LoadedCudaModule,
-    lut: Vec<State>,
+    lut_d: DeviceBuffer<State>,
+    device_current: Option<DeviceBuffer<State>>,
+    device_next: Option<DeviceBuffer<State>>,
+    neighbor_indices_d: Option<DeviceBuffer<i32>>,
+    device_topology: Vec<(isize, isize)>,
+    device_chunk_count: usize,
+    host_synced: bool,
     stats: CudaEvaluatorStats,
     last_halo_rebuild_on_device: bool,
 }
@@ -166,6 +172,8 @@ struct CudaEvaluatorStats {
     total_halo_rebuild: Duration,
     total_topology_flag_copy: Duration,
     total_memcopy_out: Duration,
+    fast_path_iterations: u64,
+    fallback_iterations: u64,
 }
 
 enum LoadedCudaModule {
@@ -265,18 +273,10 @@ where
             return Ok(());
         }
 
-        let input_flat = flatten_chunk_cells(input);
-        let output_flat = flatten_chunk_cells_mut(output);
-        let neighbor_indices = build_neighbor_indices(chunk_coords);
         let missing_neighbor_flags = vec![0u8; input.len() * 4 * CHUNK_SIZE];
-        let t_memcopy_in = std::time::Instant::now();
-        let chunk_d = DeviceBuffer::from_host(&self.stream, input_flat)?;
-        let mut chunk_new_d = DeviceBuffer::from_host(&self.stream, output_flat)?;
-        let lut_d = DeviceBuffer::from_host(&self.stream, &self.lut)?;
-        let neighbor_indices_d = DeviceBuffer::from_host(&self.stream, &neighbor_indices)?;
         let mut missing_neighbor_flags_d =
             DeviceBuffer::from_host(&self.stream, &missing_neighbor_flags)?;
-        self.stats.total_memcopy_in += t_memcopy_in.elapsed();
+        self.ensure_device_state(chunk_coords, input, output)?;
 
         let launch_config = LaunchConfig {
             grid_dim: (
@@ -289,20 +289,28 @@ where
         };
 
         let t_kernel = std::time::Instant::now();
+        let chunk_d = self
+            .device_current
+            .as_ref()
+            .expect("device current buffer must be initialized");
+        let chunk_new_d = self
+            .device_next
+            .as_mut()
+            .expect("device next buffer must be initialized");
         unsafe {
             match &self.module {
                 LoadedCudaModule::Embedded(module) => {
                     module.evaluate(
                         &self.stream,
                         launch_config,
-                        &lut_d,
-                        &chunk_d,
-                        &mut chunk_new_d,
+                        &self.lut_d,
+                        chunk_d,
+                        chunk_new_d,
                     )?;
                 }
                 LoadedCudaModule::Sidecar(module) => {
-                    let mut lut_ptr = lut_d.cu_deviceptr();
-                    let mut lut_len = lut_d.len() as u64;
+                    let mut lut_ptr = self.lut_d.cu_deviceptr();
+                    let mut lut_len = self.lut_d.len() as u64;
                     let mut chunk_ptr = chunk_d.cu_deviceptr();
                     let mut chunk_len = chunk_d.len() as u64;
                     let mut chunk_new_ptr = chunk_new_d.cu_deviceptr();
@@ -330,6 +338,14 @@ where
         self.stats.total_kernel_evaluate += t_kernel.elapsed();
 
         let t_halo = std::time::Instant::now();
+        let mut chunk_new_d = self
+            .device_next
+            .take()
+            .expect("device next buffer must be initialized");
+        let neighbor_indices_d = self
+            .neighbor_indices_d
+            .take()
+            .expect("neighbor indices buffer must be initialized");
         let halos_rebuilt_on_device = unsafe {
             self.rebuild_halos_on_device(
                 input.len(),
@@ -351,9 +367,26 @@ where
                 !missing_neighbor_flags.iter().any(|&flag| flag != 0);
         }
 
-        let t_memcopy_out = std::time::Instant::now();
-        chunk_new_d.copy_to_host(&self.stream, output_flat)?;
-        self.stats.total_memcopy_out += t_memcopy_out.elapsed();
+        self.neighbor_indices_d = Some(neighbor_indices_d);
+
+        if self.last_halo_rebuild_on_device {
+            let old_current = self
+                .device_current
+                .replace(chunk_new_d)
+                .expect("device current buffer must be initialized");
+            self.device_next = Some(old_current);
+            self.host_synced = false;
+            self.stats.fast_path_iterations += 1;
+        } else {
+            let output_flat = flatten_chunk_cells_mut(output);
+            let t_memcopy_out = std::time::Instant::now();
+            chunk_new_d.copy_to_host(&self.stream, output_flat)?;
+            self.stats.total_memcopy_out += t_memcopy_out.elapsed();
+            self.device_next = Some(chunk_new_d);
+            self.invalidate_device_state();
+            self.host_synced = true;
+            self.stats.fallback_iterations += 1;
+        }
 
         Ok(())
     }
@@ -363,11 +396,38 @@ where
             return;
         }
         rebuild_all_halos_for_storage(storage);
+        self.invalidate_device_state();
     }
 
     fn rebuild_all_halos_after_topology_change(&mut self, storage: &mut ChunkStorage<State>) {
         rebuild_all_halos_for_storage(storage);
         self.last_halo_rebuild_on_device = false;
+        self.invalidate_device_state();
+    }
+
+    fn sync_to_host_if_needed(
+        &mut self,
+        storage: &mut ChunkStorage<State>,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.host_synced {
+            return Ok(());
+        }
+
+        let Some(device_current) = &self.device_current else {
+            self.host_synced = true;
+            return Ok(());
+        };
+
+        let t_memcopy_out = std::time::Instant::now();
+        device_current.copy_to_host(&self.stream, storage.active_cells_flat_mut())?;
+        self.stats.total_memcopy_out += t_memcopy_out.elapsed();
+        self.host_synced = true;
+
+        Ok(())
+    }
+
+    fn storage_changed(&mut self) {
+        self.invalidate_device_state();
     }
 
     fn print_stats(&self) {
@@ -392,10 +452,58 @@ where
             "Total memcpy out: {}ms",
             self.stats.total_memcopy_out.as_millis()
         );
+        println!("Fast path iterations: {}", self.stats.fast_path_iterations);
+        println!("Fallback iterations: {}", self.stats.fallback_iterations);
     }
 }
 
-impl<State: CellState> CudaEvaluator<State> {
+impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
+    fn invalidate_device_state(&mut self) {
+        self.device_current = None;
+        self.device_next = None;
+        self.neighbor_indices_d = None;
+        self.device_topology.clear();
+        self.device_chunk_count = 0;
+        self.host_synced = true;
+        self.last_halo_rebuild_on_device = false;
+    }
+
+    fn ensure_device_state(
+        &mut self,
+        chunk_coords: &[(isize, isize)],
+        input: &[Chunk<State>],
+        output: &[Chunk<State>],
+    ) -> Result<(), Box<dyn Error>>
+    where
+        State: DeviceCopy,
+    {
+        let needs_upload = self.device_current.is_none()
+            || self.device_next.is_none()
+            || self.neighbor_indices_d.is_none()
+            || self.device_chunk_count != input.len()
+            || self.device_topology.as_slice() != chunk_coords;
+
+        if !needs_upload {
+            return Ok(());
+        }
+
+        let t_memcopy_in = std::time::Instant::now();
+        let input_flat = flatten_chunk_cells(input);
+        let output_flat = flatten_chunk_cells(output);
+        let neighbor_indices = build_neighbor_indices(chunk_coords);
+
+        self.device_current = Some(DeviceBuffer::from_host(&self.stream, input_flat)?);
+        self.device_next = Some(DeviceBuffer::from_host(&self.stream, output_flat)?);
+        self.neighbor_indices_d = Some(DeviceBuffer::from_host(&self.stream, &neighbor_indices)?);
+        self.device_topology.clear();
+        self.device_topology.extend_from_slice(chunk_coords);
+        self.device_chunk_count = input.len();
+        self.host_synced = true;
+        self.stats.total_memcopy_in += t_memcopy_in.elapsed();
+
+        Ok(())
+    }
+
     unsafe fn rebuild_halos_on_device(
         &mut self,
         chunk_count: usize,
@@ -488,6 +596,7 @@ impl<State: CellState> CudaEvaluator<State> {
     pub fn new(lut: Vec<State>) -> Result<Self, Box<dyn Error>> {
         let ctx = CudaContext::new(0)?;
         let stream = ctx.default_stream();
+        let lut_d = DeviceBuffer::from_host(&stream, &lut)?;
         let module = if let Ok(module) = load_sidecar_module(&ctx) {
             LoadedCudaModule::Sidecar(module)
         } else {
@@ -506,7 +615,13 @@ impl<State: CellState> CudaEvaluator<State> {
             _ctx: ctx,
             stream,
             module,
-            lut,
+            lut_d,
+            device_current: None,
+            device_next: None,
+            neighbor_indices_d: None,
+            device_topology: Vec::new(),
+            device_chunk_count: 0,
+            host_synced: true,
             stats: Default::default(),
             last_halo_rebuild_on_device: false,
         })

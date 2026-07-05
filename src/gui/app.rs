@@ -292,7 +292,7 @@ where
             || self.pixel_texture_generation != self.simulation_generation;
 
         if texture_is_stale {
-            let image = build_pixel_image(&self.automaton, &visible);
+            let image = build_pixel_image(&mut self.automaton, &visible);
 
             if let Some(texture) = &mut self.pixel_texture {
                 texture.set(image, TextureOptions::NEAREST);
@@ -334,7 +334,7 @@ where
     fn paint_svg_cells(&mut self, rect: Rect, painter: &egui::Painter) {
         let visible = visible_cell_range(rect, self.pan, self.zoom);
         let padding = if self.zoom >= 12.0 { 2.0 } else { 0.5 };
-        let automaton = &self.automaton;
+        let automaton = &mut self.automaton;
         let glyphs = &mut self.glyphs;
 
         automaton.visit_non_default_cells(
@@ -476,7 +476,7 @@ fn fixed_steps_due(
 }
 
 fn build_pixel_image<Config: CellularAutomataConfig>(
-    automaton: &CellularAutomaton<Config>,
+    automaton: &mut CellularAutomaton<Config>,
     visible: &VisibleCellRange,
 ) -> ColorImage
 where
@@ -626,7 +626,7 @@ mod tests {
             max_y: 1,
         };
 
-        let image = build_pixel_image(&automaton, &bounds);
+        let image = build_pixel_image(&mut automaton, &bounds);
 
         assert_eq!(image.size, [3, 3]);
         assert_eq!(image.pixels[4], Color32::from_rgb(32, 33, 36));
