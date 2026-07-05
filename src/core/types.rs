@@ -126,18 +126,6 @@ pub trait CellRuleEvaluator<State: CellState, Neighborhood: CellNeighborhood<Sta
     fn evaluate(&self, state: State, neighbors: &Neighborhood) -> State;
 }
 
-pub struct CellStateChange<State: CellState> {
-    pub cell_index_in_chunk: (usize, usize),
-    #[allow(unused)]
-    pub old_state: State,
-    pub new_state: State,
-}
-
-pub struct ChunkStateChanges<State: CellState> {
-    pub chunk_index: usize,
-    pub changes: Vec<CellStateChange<State>>,
-}
-
 pub trait CellGridEvaluator<
     State: CellState,
     Neighborhood: CellNeighborhood<State>,
@@ -146,9 +134,11 @@ pub trait CellGridEvaluator<
 {
     fn evaluate_all(
         &mut self,
-        storage: &ChunkStorage<State>,
+        input: &[Chunk<State>],
+        coords: &[(isize, isize)],
+        output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    ) -> Vec<ChunkStateChanges<State>>;
+    );
 }
 
 pub trait CellularAutomataConfig {
@@ -239,11 +229,12 @@ where
 
     pub fn evaluate_next(&mut self) {
         let t0 = std::time::Instant::now();
-        let changes = self
-            .grid_evaluator
-            .evaluate_all(&self.storage, &self.rule_evaluator);
+        self.storage.prepare_next_chunks();
+        let (input, coords, output) = self.storage.chunk_buffers();
+        self.grid_evaluator
+            .evaluate_all(input, coords, output, &self.rule_evaluator);
         let t1 = std::time::Instant::now();
-        self.storage.apply_changes(&changes);
+        self.storage.commit_next_chunks();
         let t2 = std::time::Instant::now();
         self.storage.on_evaluate_next();
         let t3 = std::time::Instant::now();

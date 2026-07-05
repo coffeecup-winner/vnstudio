@@ -14,17 +14,15 @@ fn evaluate_chunk<
     Neighborhood: CellNeighborhood<State>,
     Evaluator: CellRuleEvaluator<State, Neighborhood> + ?Sized,
 >(
-    chunk_index: usize,
     chunk: &Chunk<State>,
+    output: &mut Chunk<State>,
     evaluator: &Evaluator,
-) -> Option<ChunkStateChanges<State>>
-where
+) where
     Chunk<State>: FillNeighborhood<State, Neighborhood>,
 {
-    let mut changes = Vec::new();
     let mut state = State::default();
     let mut neighborhood = Neighborhood::default();
-    let mut index = chunk.get_start_index();
+    let mut index = interior_start_index();
 
     for y in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
@@ -37,28 +35,18 @@ where
                     .iter()
                     .all(|&n| n == State::default())
             {
+                set_interior_state(output, x, y, State::default());
                 index += 1;
                 continue;
             }
 
             let new_state = evaluator.evaluate(state, &neighborhood);
-            if state != new_state {
-                changes.push(CellStateChange {
-                    cell_index_in_chunk: (x, y),
-                    old_state: state,
-                    new_state,
-                });
-            }
+            set_interior_state(output, x, y, new_state);
             index += 1;
         }
         // Skip external right/left borders
         index += 2;
     }
-
-    (!changes.is_empty()).then_some(ChunkStateChanges {
-        chunk_index,
-        changes,
-    })
 }
 
 impl<
@@ -71,17 +59,16 @@ where
 {
     fn evaluate_all(
         &mut self,
-        storage: &ChunkStorage<State>,
+        input: &[Chunk<State>],
+        coords: &[(isize, isize)],
+        output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    ) -> Vec<ChunkStateChanges<State>> {
-        let mut changes = vec![];
-        for (index, chunk) in storage.chunks().iter().enumerate() {
-            if let Some(chunk_changes) = evaluate_chunk(index, chunk, evaluator) {
-                changes.push(chunk_changes);
-            }
+    ) {
+        assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), coords.len());
+        for (chunk, output) in input.iter().zip(output) {
+            evaluate_chunk(chunk, output, evaluator);
         }
-
-        changes
     }
 }
 
@@ -178,25 +165,22 @@ where
 {
     fn evaluate_all(
         &mut self,
-        storage: &ChunkStorage<State>,
+        input: &[Chunk<State>],
+        coords: &[(isize, isize)],
+        output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    ) -> Vec<ChunkStateChanges<State>> {
-        let chunks = storage.chunks();
-
+    ) {
+        assert_eq!(input.len(), output.len());
+        assert_eq!(input.len(), coords.len());
         self.pool.install(|| {
-            chunks
+            input
                 .par_chunks(CHUNKS_PER_TASK)
-                .enumerate()
-                .flat_map_iter(|(batch_index, chunks)| {
-                    let first_chunk_index = batch_index * CHUNKS_PER_TASK;
-                    chunks
-                        .iter()
-                        .enumerate()
-                        .filter_map(move |(offset, chunk)| {
-                            evaluate_chunk(first_chunk_index + offset, chunk, evaluator)
-                        })
+                .zip(output.par_chunks_mut(CHUNKS_PER_TASK))
+                .for_each(|(chunks, output_chunks)| {
+                    for (chunk, output) in chunks.iter().zip(output_chunks) {
+                        evaluate_chunk(chunk, output, evaluator);
+                    }
                 })
-                .collect()
-        })
+        });
     }
 }

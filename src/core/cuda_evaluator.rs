@@ -1,4 +1,7 @@
-use crate::core::{storage::{CHUNK_SIZE, Chunk, FillNeighborhood}, types::{CellGridEvaluator, CellNeighborhood, CellRuleEvaluator, CellState}};
+use crate::core::{
+    storage::{CHUNK_SIZE, Chunk, FillNeighborhood},
+    types::{CellGridEvaluator, CellNeighborhood, CellRuleEvaluator, CellState},
+};
 
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
@@ -73,9 +76,11 @@ where
 {
     fn evaluate_all(
         &mut self,
-        storage: &super::storage::ChunkStorage<State>,
-        evaluator: &Evaluator,
-    ) -> Vec<super::types::ChunkStateChanges<State>> {
+        _input: &[Chunk<State>],
+        _coords: &[(isize, isize)],
+        _output: &mut [Chunk<State>],
+        _evaluator: &Evaluator,
+    ) {
         todo!()
     }
 }
