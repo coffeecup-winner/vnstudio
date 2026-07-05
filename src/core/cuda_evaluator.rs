@@ -107,7 +107,9 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         shared_mem_bytes: 0,
     };
     for _ in 0..NUM_ITERATIONS {
-        module.evaluate(&stream, launch_config, &lut_d, &chunk_d, &mut chunk_new_d)?;
+        unsafe {
+            module.evaluate(&stream, launch_config, &lut_d, &chunk_d, &mut chunk_new_d)?;
+        }
     }
     let end = std::time::Instant::now();
     println!(
