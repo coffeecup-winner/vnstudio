@@ -99,10 +99,17 @@ mod kernels {
     }
 
     #[kernel]
+    pub fn clear_topology_flag(mut topology_changed: DisjointSlice<u8>) {
+        unsafe {
+            *topology_changed.get_unchecked_mut(0) = 0;
+        }
+    }
+
+    #[kernel]
     pub fn rebuild_von_neumann_halos<State: CellState>(
         mut chunks: DisjointSlice<State>,
         neighbor_indices: &[i32],
-        mut missing_neighbor_flags: DisjointSlice<u8>,
+        mut topology_changed: DisjointSlice<u8>,
     ) {
         let block = thread::blockIdx_x();
         let side = block % 4;
@@ -143,8 +150,7 @@ mod kernels {
             }
         } else if state != State::default() {
             unsafe {
-                *missing_neighbor_flags
-                    .get_unchecked_mut((block * CHUNK_SIZE as u32 + edge_index) as usize) = 1;
+                *topology_changed.get_unchecked_mut(0) = 1;
             }
         }
     }
@@ -158,6 +164,7 @@ pub struct CudaEvaluator<State: CellState> {
     device_current: Option<DeviceBuffer<State>>,
     device_next: Option<DeviceBuffer<State>>,
     neighbor_indices_d: Option<DeviceBuffer<i32>>,
+    topology_changed_d: DeviceBuffer<u8>,
     device_topology: Vec<(isize, isize)>,
     device_chunk_count: usize,
     host_synced: bool,
@@ -184,6 +191,7 @@ enum LoadedCudaModule {
 struct SidecarCudaModule {
     evaluate: CudaFunction,
     clear_halos: Option<CudaFunction>,
+    clear_topology_flag: Option<CudaFunction>,
     rebuild_von_neumann_halos: Option<CudaFunction>,
 }
 
@@ -243,12 +251,15 @@ fn load_sidecar_module(ctx: &Arc<CudaContext>) -> Result<SidecarCudaModule, Box<
         .and_then(|name| module.load_function(&name).map_err(io::Error::other))?;
     let clear_halos = sidecar_kernel_name(&kernel_names, "clear_halos")
         .and_then(|name| module.load_function(&name).ok());
+    let clear_topology_flag = sidecar_kernel_name(&kernel_names, "clear_topology_flag")
+        .and_then(|name| module.load_function(&name).ok());
     let rebuild_von_neumann_halos = sidecar_kernel_name(&kernel_names, "rebuild_von_neumann_halos")
         .and_then(|name| module.load_function(&name).ok());
 
     Ok(SidecarCudaModule {
         evaluate,
         clear_halos,
+        clear_topology_flag,
         rebuild_von_neumann_halos,
     })
 }
@@ -273,9 +284,6 @@ where
             return Ok(());
         }
 
-        let missing_neighbor_flags = vec![0u8; input.len() * 4 * CHUNK_SIZE];
-        let mut missing_neighbor_flags_d =
-            DeviceBuffer::from_host(&self.stream, &missing_neighbor_flags)?;
         self.ensure_device_state(chunk_coords, input, output)?;
 
         let launch_config = LaunchConfig {
@@ -347,24 +355,26 @@ where
             .take()
             .expect("neighbor indices buffer must be initialized");
         let halos_rebuilt_on_device = unsafe {
-            self.rebuild_halos_on_device(
+            Self::rebuild_halos_on_device(
+                &self.module,
+                &self.stream,
                 input.len(),
                 &mut chunk_new_d,
                 &neighbor_indices_d,
-                &mut missing_neighbor_flags_d,
+                &mut self.topology_changed_d,
             )?
         };
         if halos_rebuilt_on_device {
             self.stream.synchronize()?;
             self.stats.total_halo_rebuild += t_halo.elapsed();
 
-            let mut missing_neighbor_flags = missing_neighbor_flags;
+            let mut topology_changed = [0u8];
             let t_flag = std::time::Instant::now();
-            missing_neighbor_flags_d.copy_to_host(&self.stream, &mut missing_neighbor_flags)?;
+            self.topology_changed_d
+                .copy_to_host(&self.stream, &mut topology_changed)?;
             self.stats.total_topology_flag_copy += t_flag.elapsed();
 
-            self.last_halo_rebuild_on_device =
-                !missing_neighbor_flags.iter().any(|&flag| flag != 0);
+            self.last_halo_rebuild_on_device = topology_changed[0] == 0;
         }
 
         self.neighbor_indices_d = Some(neighbor_indices_d);
@@ -505,11 +515,12 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
     }
 
     unsafe fn rebuild_halos_on_device(
-        &mut self,
+        module: &LoadedCudaModule,
+        stream: &Arc<CudaStream>,
         chunk_count: usize,
         chunks: &mut DeviceBuffer<State>,
         neighbor_indices: &DeviceBuffer<i32>,
-        missing_neighbor_flags: &mut DeviceBuffer<u8>,
+        topology_changed: &mut DeviceBuffer<u8>,
     ) -> Result<bool, Box<dyn Error>>
     where
         State: DeviceCopy,
@@ -524,27 +535,52 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
             block_dim: (CHUNK_SIZE as u32, 1, 1),
             shared_mem_bytes: 0,
         };
+        let flag_config = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
 
-        match &self.module {
+        match module {
             LoadedCudaModule::Embedded(module) => {
                 unsafe {
-                    module.clear_halos(&self.stream, clear_config, chunks)?;
+                    module.clear_topology_flag(stream, flag_config, topology_changed)?;
+                    module.clear_halos(stream, clear_config, chunks)?;
                     module.rebuild_von_neumann_halos(
-                        &self.stream,
+                        stream,
                         rebuild_config,
                         chunks,
                         neighbor_indices,
-                        missing_neighbor_flags,
+                        topology_changed,
                     )?;
                 }
                 Ok(true)
             }
             LoadedCudaModule::Sidecar(module) => {
-                let (Some(clear_halos), Some(rebuild_von_neumann_halos)) =
-                    (&module.clear_halos, &module.rebuild_von_neumann_halos)
-                else {
+                let (Some(clear_halos), Some(clear_topology_flag), Some(rebuild_von_neumann_halos)) = (
+                    &module.clear_halos,
+                    &module.clear_topology_flag,
+                    &module.rebuild_von_neumann_halos,
+                ) else {
                     return Ok(false);
                 };
+
+                let mut topology_changed_ptr = topology_changed.cu_deviceptr();
+                let mut topology_changed_len = topology_changed.len() as u64;
+                let mut flag_args = [
+                    (&mut topology_changed_ptr as *mut _) as *mut std::ffi::c_void,
+                    (&mut topology_changed_len as *mut _) as *mut std::ffi::c_void,
+                ];
+                unsafe {
+                    launch_kernel_on_stream(
+                        clear_topology_flag,
+                        flag_config.grid_dim,
+                        flag_config.block_dim,
+                        flag_config.shared_mem_bytes,
+                        stream,
+                        &mut flag_args,
+                    )?;
+                }
 
                 let mut chunks_ptr = chunks.cu_deviceptr();
                 let mut chunks_len = chunks.len() as u64;
@@ -558,7 +594,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
                         clear_config.grid_dim,
                         clear_config.block_dim,
                         clear_config.shared_mem_bytes,
-                        &self.stream,
+                        stream,
                         &mut clear_args,
                     )?;
                 }
@@ -567,15 +603,15 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
                 let mut chunks_len = chunks.len() as u64;
                 let mut neighbor_indices_ptr = neighbor_indices.cu_deviceptr();
                 let mut neighbor_indices_len = neighbor_indices.len() as u64;
-                let mut missing_neighbor_flags_ptr = missing_neighbor_flags.cu_deviceptr();
-                let mut missing_neighbor_flags_len = missing_neighbor_flags.len() as u64;
+                let mut topology_changed_ptr = topology_changed.cu_deviceptr();
+                let mut topology_changed_len = topology_changed.len() as u64;
                 let mut rebuild_args = [
                     (&mut chunks_ptr as *mut _) as *mut std::ffi::c_void,
                     (&mut chunks_len as *mut _) as *mut std::ffi::c_void,
                     (&mut neighbor_indices_ptr as *mut _) as *mut std::ffi::c_void,
                     (&mut neighbor_indices_len as *mut _) as *mut std::ffi::c_void,
-                    (&mut missing_neighbor_flags_ptr as *mut _) as *mut std::ffi::c_void,
-                    (&mut missing_neighbor_flags_len as *mut _) as *mut std::ffi::c_void,
+                    (&mut topology_changed_ptr as *mut _) as *mut std::ffi::c_void,
+                    (&mut topology_changed_len as *mut _) as *mut std::ffi::c_void,
                 ];
                 unsafe {
                     launch_kernel_on_stream(
@@ -583,7 +619,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
                         rebuild_config.grid_dim,
                         rebuild_config.block_dim,
                         rebuild_config.shared_mem_bytes,
-                        &self.stream,
+                        stream,
                         &mut rebuild_args,
                     )?;
                 }
@@ -597,6 +633,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
         let ctx = CudaContext::new(0)?;
         let stream = ctx.default_stream();
         let lut_d = DeviceBuffer::from_host(&stream, &lut)?;
+        let topology_changed_d = DeviceBuffer::from_host(&stream, &[0u8])?;
         let module = if let Ok(module) = load_sidecar_module(&ctx) {
             LoadedCudaModule::Sidecar(module)
         } else {
@@ -619,6 +656,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
             device_current: None,
             device_next: None,
             neighbor_indices_d: None,
+            topology_changed_d,
             device_topology: Vec::new(),
             device_chunk_count: 0,
             host_synced: true,
