@@ -14,7 +14,7 @@ use cuda_core::{
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::{EmbeddedModuleError, cuda_module, load_kernel_module};
 
-use std::{error::Error, io, sync::Arc};
+use std::{error::Error, io, sync::Arc, time::Duration};
 
 // Size of the chunk with the external borders
 const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
@@ -80,6 +80,14 @@ pub struct CudaEvaluator<State: CellState> {
     stream: Arc<CudaStream>,
     module: LoadedCudaModule,
     lut: Vec<State>,
+    stats: CudaEvaluatorStats,
+}
+
+#[derive(Default)]
+struct CudaEvaluatorStats {
+    total_memcopy_in: Duration,
+    total_kernel_evaluate: Duration,
+    total_memcopy_out: Duration,
 }
 
 enum LoadedCudaModule {
@@ -116,9 +124,11 @@ where
 
         let input_flat = flatten_chunk_cells(input);
         let output_flat = flatten_chunk_cells_mut(output);
+        let t_memcopy_in = std::time::Instant::now();
         let chunk_d = DeviceBuffer::from_host(&self.stream, input_flat)?;
         let mut chunk_new_d = DeviceBuffer::from_host(&self.stream, output_flat)?;
         let lut_d = DeviceBuffer::from_host(&self.stream, &self.lut)?;
+        self.stats.total_memcopy_in += t_memcopy_in.elapsed();
 
         let launch_config = LaunchConfig {
             grid_dim: (
@@ -130,6 +140,7 @@ where
             shared_mem_bytes: 0,
         };
 
+        let t_kernel = std::time::Instant::now();
         unsafe {
             match &self.module {
                 LoadedCudaModule::Embedded(module) => {
@@ -167,13 +178,34 @@ where
                 }
             }
         }
+        self.stream.synchronize()?;
+        self.stats.total_kernel_evaluate += t_kernel.elapsed();
+
+        let t_memcopy_out = std::time::Instant::now();
         chunk_new_d.copy_to_host(&self.stream, output_flat)?;
+        self.stats.total_memcopy_out += t_memcopy_out.elapsed();
 
         Ok(())
     }
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
         rebuild_all_halos_for_storage(storage);
+    }
+
+    fn print_stats(&self) {
+        println!("CUDA evaluator stats:");
+        println!(
+            "Total memcpy in: {}ms",
+            self.stats.total_memcopy_in.as_millis()
+        );
+        println!(
+            "Total kernel evaluation: {}ms",
+            self.stats.total_kernel_evaluate.as_millis()
+        );
+        println!(
+            "Total memcpy out: {}ms",
+            self.stats.total_memcopy_out.as_millis()
+        );
     }
 }
 
@@ -194,6 +226,7 @@ impl<State: CellState> CudaEvaluator<State> {
             stream,
             module,
             lut,
+            stats: Default::default(),
         })
     }
 }

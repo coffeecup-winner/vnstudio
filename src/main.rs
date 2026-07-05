@@ -87,6 +87,7 @@ where
         times.total_storage_optimize.as_millis(),
         times.total_storage_optimize.as_millis() as f64 * 100.0 / total_ops.as_millis() as f64
     );
+    automaton.print_evaluator_stats();
 }
 
 fn cuda_enabled() -> bool {

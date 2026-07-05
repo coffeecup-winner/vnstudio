@@ -141,6 +141,8 @@ pub trait CellGridEvaluator<
     ) -> Result<(), Box<dyn Error>>;
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>);
+
+    fn print_stats(&self) {}
 }
 
 pub trait CellularAutomataConfig {
@@ -238,6 +240,10 @@ where
 
     pub fn operation_times(&self) -> &CellularAutomatonOperationTimes {
         &self.operation_times
+    }
+
+    pub fn print_evaluator_stats(&self) {
+        self.grid_evaluator.print_stats();
     }
 
     pub fn chunk_count(&self) -> usize {
