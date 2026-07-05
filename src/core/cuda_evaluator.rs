@@ -75,30 +75,6 @@ mod kernels {
     }
 
     #[kernel]
-    pub fn clear_halos<State: CellState>(mut chunks: DisjointSlice<State>) {
-        let chunk_index = thread::blockIdx_x();
-        let thread_index = thread::threadIdx_x();
-        let chunk_start = chunk_index * (EXTENDED_CHUNK_SIZE as u32) * (EXTENDED_CHUNK_SIZE as u32);
-        let default_state = State::default();
-
-        let mut cell = thread_index;
-        while cell < (EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE) as u32 {
-            let x = cell % EXTENDED_CHUNK_SIZE as u32;
-            let y = cell / EXTENDED_CHUNK_SIZE as u32;
-            if x == 0
-                || x == (EXTENDED_CHUNK_SIZE - 1) as u32
-                || y == 0
-                || y == (EXTENDED_CHUNK_SIZE - 1) as u32
-            {
-                unsafe {
-                    *chunks.get_unchecked_mut((chunk_start + cell) as usize) = default_state;
-                }
-            }
-            cell += 256;
-        }
-    }
-
-    #[kernel]
     pub fn clear_topology_flag(mut topology_changed: DisjointSlice<u8>) {
         unsafe {
             *topology_changed.get_unchecked_mut(0) = 0;
@@ -106,53 +82,39 @@ mod kernels {
     }
 
     #[kernel]
-    pub fn rebuild_von_neumann_halos<State: CellState>(
+    pub fn apply_von_neumann_halo_ops<State: CellState>(
         mut chunks: DisjointSlice<State>,
-        neighbor_indices: &[i32],
+        halo_ops: &[u32],
         mut topology_changed: DisjointSlice<u8>,
     ) {
-        let block = thread::blockIdx_x();
-        let side = block % 4;
-        let chunk_index = block / 4;
-        let edge_index = thread::threadIdx_x();
-        let neighbor_index = neighbor_indices[block as usize];
-        let chunk_start = chunk_index * (EXTENDED_CHUNK_SIZE as u32) * (EXTENDED_CHUNK_SIZE as u32);
+        let op_index = block_linear_index();
+        let op_offset = op_index * 3;
+        if op_offset + 2 >= halo_ops.len() as u32 {
+            return;
+        }
 
-        let (source_index, dest_index_in_neighbor) = if side == 0 {
-            (
-                chunk_start + EXTENDED_CHUNK_SIZE as u32 + 1 + edge_index,
-                ((EXTENDED_CHUNK_SIZE - 1) * EXTENDED_CHUNK_SIZE + 1) as u32 + edge_index,
-            )
-        } else if side == 1 {
-            (
-                chunk_start + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32 + 1,
-                (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32 + (EXTENDED_CHUNK_SIZE - 1) as u32,
-            )
-        } else if side == 2 {
-            (
-                chunk_start + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32 + CHUNK_SIZE as u32,
-                (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32,
-            )
-        } else {
-            (
-                chunk_start + (CHUNK_SIZE as u32) * EXTENDED_CHUNK_SIZE as u32 + 1 + edge_index,
-                1 + edge_index,
-            )
-        };
+        let source_index = halo_ops[op_offset as usize];
+        let dest_index = halo_ops[(op_offset + 1) as usize];
+        let flags = halo_ops[(op_offset + 2) as usize];
 
         let state = unsafe { *chunks.get_unchecked_mut(source_index as usize) };
-        if neighbor_index >= 0 {
-            let neighbor_start =
-                neighbor_index as u32 * (EXTENDED_CHUNK_SIZE as u32) * (EXTENDED_CHUNK_SIZE as u32);
+        if flags == 0 {
             unsafe {
-                *chunks.get_unchecked_mut((neighbor_start + dest_index_in_neighbor) as usize) =
-                    state;
+                *chunks.get_unchecked_mut(dest_index as usize) = state;
             }
-        } else if state != State::default() {
+        } else {
+            let default_state = State::default();
             unsafe {
-                *topology_changed.get_unchecked_mut(0) = 1;
+                *chunks.get_unchecked_mut(dest_index as usize) = default_state;
+                if state != default_state {
+                    *topology_changed.get_unchecked_mut(0) = 1;
+                }
             }
         }
+    }
+
+    fn block_linear_index() -> u32 {
+        thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x()
     }
 }
 
@@ -163,7 +125,7 @@ pub struct CudaEvaluator<State: CellState> {
     lut_d: DeviceBuffer<State>,
     device_current: Option<DeviceBuffer<State>>,
     device_next: Option<DeviceBuffer<State>>,
-    neighbor_indices_d: Option<DeviceBuffer<i32>>,
+    halo_ops_d: Option<DeviceBuffer<u32>>,
     topology_changed_d: DeviceBuffer<u8>,
     device_topology: Vec<(isize, isize)>,
     device_chunk_count: usize,
@@ -190,9 +152,8 @@ enum LoadedCudaModule {
 
 struct SidecarCudaModule {
     evaluate: CudaFunction,
-    clear_halos: Option<CudaFunction>,
     clear_topology_flag: Option<CudaFunction>,
-    rebuild_von_neumann_halos: Option<CudaFunction>,
+    apply_von_neumann_halo_ops: Option<CudaFunction>,
 }
 
 fn sidecar_kernel_names() -> Result<Vec<String>, Box<dyn Error>> {
@@ -222,20 +183,77 @@ fn sidecar_kernel_name(kernel_names: &[String], prefix: &str) -> Option<String> 
         .cloned()
 }
 
-fn build_neighbor_indices(chunk_coords: &[(isize, isize)]) -> Vec<i32> {
+const HALO_OP_STRIDE: usize = 3;
+const HALO_OP_MISSING_NEIGHBOR: u32 = 1;
+
+fn build_halo_ops(chunk_coords: &[(isize, isize)]) -> Vec<u32> {
     let chunk_indices = chunk_coords
         .iter()
         .enumerate()
         .map(|(index, &coords)| (coords, index as i32))
         .collect::<HashMap<_, _>>();
-    let mut neighbor_indices = Vec::with_capacity(chunk_coords.len() * 4);
-    for &(x, y) in chunk_coords {
-        neighbor_indices.push(*chunk_indices.get(&(x, y - 1)).unwrap_or(&-1));
-        neighbor_indices.push(*chunk_indices.get(&(x - 1, y)).unwrap_or(&-1));
-        neighbor_indices.push(*chunk_indices.get(&(x + 1, y)).unwrap_or(&-1));
-        neighbor_indices.push(*chunk_indices.get(&(x, y + 1)).unwrap_or(&-1));
+    let mut halo_ops = Vec::with_capacity(chunk_coords.len() * 4 * CHUNK_SIZE * HALO_OP_STRIDE);
+    for (chunk_index, &(x, y)) in chunk_coords.iter().enumerate() {
+        let chunk_start = (chunk_index * EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE) as u32;
+        let neighbors = [
+            chunk_indices.get(&(x, y - 1)).copied(),
+            chunk_indices.get(&(x - 1, y)).copied(),
+            chunk_indices.get(&(x + 1, y)).copied(),
+            chunk_indices.get(&(x, y + 1)).copied(),
+        ];
+
+        for edge_index in 0..CHUNK_SIZE as u32 {
+            for (side, neighbor_index) in neighbors.iter().enumerate() {
+                let (source_index, dest_index_in_neighbor, missing_dest_index) = match side {
+                    0 => (
+                        chunk_start + EXTENDED_CHUNK_SIZE as u32 + 1 + edge_index,
+                        ((EXTENDED_CHUNK_SIZE - 1) * EXTENDED_CHUNK_SIZE + 1) as u32 + edge_index,
+                        chunk_start + 1 + edge_index,
+                    ),
+                    1 => (
+                        chunk_start + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32 + 1,
+                        (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32
+                            + (EXTENDED_CHUNK_SIZE - 1) as u32,
+                        chunk_start + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32,
+                    ),
+                    2 => (
+                        chunk_start
+                            + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32
+                            + CHUNK_SIZE as u32,
+                        (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32,
+                        chunk_start
+                            + (edge_index + 1) * EXTENDED_CHUNK_SIZE as u32
+                            + (EXTENDED_CHUNK_SIZE - 1) as u32,
+                    ),
+                    _ => (
+                        chunk_start
+                            + (CHUNK_SIZE as u32) * EXTENDED_CHUNK_SIZE as u32
+                            + 1
+                            + edge_index,
+                        1 + edge_index,
+                        chunk_start
+                            + ((EXTENDED_CHUNK_SIZE - 1) * EXTENDED_CHUNK_SIZE) as u32
+                            + 1
+                            + edge_index,
+                    ),
+                };
+
+                if let Some(neighbor_index) = neighbor_index {
+                    let neighbor_start = *neighbor_index as u32
+                        * (EXTENDED_CHUNK_SIZE as u32)
+                        * (EXTENDED_CHUNK_SIZE as u32);
+                    halo_ops.push(source_index);
+                    halo_ops.push(neighbor_start + dest_index_in_neighbor);
+                    halo_ops.push(0);
+                } else {
+                    halo_ops.push(source_index);
+                    halo_ops.push(missing_dest_index);
+                    halo_ops.push(HALO_OP_MISSING_NEIGHBOR);
+                }
+            }
+        }
     }
-    neighbor_indices
+    halo_ops
 }
 
 fn load_sidecar_module(ctx: &Arc<CudaContext>) -> Result<SidecarCudaModule, Box<dyn Error>> {
@@ -249,18 +267,16 @@ fn load_sidecar_module(ctx: &Arc<CudaContext>) -> Result<SidecarCudaModule, Box<
             )
         })
         .and_then(|name| module.load_function(&name).map_err(io::Error::other))?;
-    let clear_halos = sidecar_kernel_name(&kernel_names, "clear_halos")
-        .and_then(|name| module.load_function(&name).ok());
     let clear_topology_flag = sidecar_kernel_name(&kernel_names, "clear_topology_flag")
         .and_then(|name| module.load_function(&name).ok());
-    let rebuild_von_neumann_halos = sidecar_kernel_name(&kernel_names, "rebuild_von_neumann_halos")
-        .and_then(|name| module.load_function(&name).ok());
+    let apply_von_neumann_halo_ops =
+        sidecar_kernel_name(&kernel_names, "apply_von_neumann_halo_ops")
+            .and_then(|name| module.load_function(&name).ok());
 
     Ok(SidecarCudaModule {
         evaluate,
-        clear_halos,
         clear_topology_flag,
-        rebuild_von_neumann_halos,
+        apply_von_neumann_halo_ops,
     })
 }
 
@@ -350,17 +366,17 @@ where
             .device_next
             .take()
             .expect("device next buffer must be initialized");
-        let neighbor_indices_d = self
-            .neighbor_indices_d
+        let halo_ops_d = self
+            .halo_ops_d
             .take()
-            .expect("neighbor indices buffer must be initialized");
+            .expect("halo ops buffer must be initialized");
         let halos_rebuilt_on_device = unsafe {
             Self::rebuild_halos_on_device(
                 &self.module,
                 &self.stream,
-                input.len(),
+                self.device_chunk_count,
                 &mut chunk_new_d,
-                &neighbor_indices_d,
+                &halo_ops_d,
                 &mut self.topology_changed_d,
             )?
         };
@@ -377,7 +393,7 @@ where
             self.last_halo_rebuild_on_device = topology_changed[0] == 0;
         }
 
-        self.neighbor_indices_d = Some(neighbor_indices_d);
+        self.halo_ops_d = Some(halo_ops_d);
 
         if self.last_halo_rebuild_on_device {
             let old_current = self
@@ -471,7 +487,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
     fn invalidate_device_state(&mut self) {
         self.device_current = None;
         self.device_next = None;
-        self.neighbor_indices_d = None;
+        self.halo_ops_d = None;
         self.device_topology.clear();
         self.device_chunk_count = 0;
         self.host_synced = true;
@@ -489,7 +505,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
     {
         let needs_upload = self.device_current.is_none()
             || self.device_next.is_none()
-            || self.neighbor_indices_d.is_none()
+            || self.halo_ops_d.is_none()
             || self.device_chunk_count != input.len()
             || self.device_topology.as_slice() != chunk_coords;
 
@@ -500,11 +516,11 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
         let t_memcopy_in = std::time::Instant::now();
         let input_flat = flatten_chunk_cells(input);
         let output_flat = flatten_chunk_cells(output);
-        let neighbor_indices = build_neighbor_indices(chunk_coords);
+        let halo_ops = build_halo_ops(chunk_coords);
 
         self.device_current = Some(DeviceBuffer::from_host(&self.stream, input_flat)?);
         self.device_next = Some(DeviceBuffer::from_host(&self.stream, output_flat)?);
-        self.neighbor_indices_d = Some(DeviceBuffer::from_host(&self.stream, &neighbor_indices)?);
+        self.halo_ops_d = Some(DeviceBuffer::from_host(&self.stream, &halo_ops)?);
         self.device_topology.clear();
         self.device_topology.extend_from_slice(chunk_coords);
         self.device_chunk_count = input.len();
@@ -519,20 +535,15 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
         stream: &Arc<CudaStream>,
         chunk_count: usize,
         chunks: &mut DeviceBuffer<State>,
-        neighbor_indices: &DeviceBuffer<i32>,
+        halo_ops: &DeviceBuffer<u32>,
         topology_changed: &mut DeviceBuffer<u8>,
     ) -> Result<bool, Box<dyn Error>>
     where
         State: DeviceCopy,
     {
-        let clear_config = LaunchConfig {
-            grid_dim: (chunk_count as u32, 1, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
         let rebuild_config = LaunchConfig {
-            grid_dim: (chunk_count as u32 * 4, 1, 1),
-            block_dim: (CHUNK_SIZE as u32, 1, 1),
+            grid_dim: ((chunk_count * 4 * CHUNK_SIZE).div_ceil(256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
         let flag_config = LaunchConfig {
@@ -545,22 +556,20 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
             LoadedCudaModule::Embedded(module) => {
                 unsafe {
                     module.clear_topology_flag(stream, flag_config, topology_changed)?;
-                    module.clear_halos(stream, clear_config, chunks)?;
-                    module.rebuild_von_neumann_halos(
+                    module.apply_von_neumann_halo_ops(
                         stream,
                         rebuild_config,
                         chunks,
-                        neighbor_indices,
+                        halo_ops,
                         topology_changed,
                     )?;
                 }
                 Ok(true)
             }
             LoadedCudaModule::Sidecar(module) => {
-                let (Some(clear_halos), Some(clear_topology_flag), Some(rebuild_von_neumann_halos)) = (
-                    &module.clear_halos,
+                let (Some(clear_topology_flag), Some(apply_von_neumann_halo_ops)) = (
                     &module.clear_topology_flag,
-                    &module.rebuild_von_neumann_halos,
+                    &module.apply_von_neumann_halo_ops,
                 ) else {
                     return Ok(false);
                 };
@@ -584,38 +593,21 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
 
                 let mut chunks_ptr = chunks.cu_deviceptr();
                 let mut chunks_len = chunks.len() as u64;
-                let mut clear_args = [
-                    (&mut chunks_ptr as *mut _) as *mut std::ffi::c_void,
-                    (&mut chunks_len as *mut _) as *mut std::ffi::c_void,
-                ];
-                unsafe {
-                    launch_kernel_on_stream(
-                        clear_halos,
-                        clear_config.grid_dim,
-                        clear_config.block_dim,
-                        clear_config.shared_mem_bytes,
-                        stream,
-                        &mut clear_args,
-                    )?;
-                }
-
-                let mut chunks_ptr = chunks.cu_deviceptr();
-                let mut chunks_len = chunks.len() as u64;
-                let mut neighbor_indices_ptr = neighbor_indices.cu_deviceptr();
-                let mut neighbor_indices_len = neighbor_indices.len() as u64;
+                let mut halo_ops_ptr = halo_ops.cu_deviceptr();
+                let mut halo_ops_len = halo_ops.len() as u64;
                 let mut topology_changed_ptr = topology_changed.cu_deviceptr();
                 let mut topology_changed_len = topology_changed.len() as u64;
                 let mut rebuild_args = [
                     (&mut chunks_ptr as *mut _) as *mut std::ffi::c_void,
                     (&mut chunks_len as *mut _) as *mut std::ffi::c_void,
-                    (&mut neighbor_indices_ptr as *mut _) as *mut std::ffi::c_void,
-                    (&mut neighbor_indices_len as *mut _) as *mut std::ffi::c_void,
+                    (&mut halo_ops_ptr as *mut _) as *mut std::ffi::c_void,
+                    (&mut halo_ops_len as *mut _) as *mut std::ffi::c_void,
                     (&mut topology_changed_ptr as *mut _) as *mut std::ffi::c_void,
                     (&mut topology_changed_len as *mut _) as *mut std::ffi::c_void,
                 ];
                 unsafe {
                     launch_kernel_on_stream(
-                        rebuild_von_neumann_halos,
+                        apply_von_neumann_halo_ops,
                         rebuild_config.grid_dim,
                         rebuild_config.block_dim,
                         rebuild_config.shared_mem_bytes,
@@ -655,7 +647,7 @@ impl<State: CellState + DeviceCopy> CudaEvaluator<State> {
             lut_d,
             device_current: None,
             device_next: None,
-            neighbor_indices_d: None,
+            halo_ops_d: None,
             topology_changed_d,
             device_topology: Vec::new(),
             device_chunk_count: 0,
@@ -671,17 +663,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn neighbor_indices_follow_top_left_right_bottom_order() {
+    fn halo_ops_copy_to_existing_cardinal_neighbors() {
         let coords = vec![(0, 0), (0, -1), (-1, 0), (1, 0), (0, 1)];
+        let ops = build_halo_ops(&coords);
+        let chunk_cells = (EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE) as u32;
 
+        assert_eq!(ops.len(), coords.len() * 4 * CHUNK_SIZE * HALO_OP_STRIDE);
         assert_eq!(
-            build_neighbor_indices(&coords),
+            &ops[0..12],
             vec![
-                1, 2, 3, 4, // (0, 0)
-                -1, -1, -1, 0, // (0, -1)
-                -1, -1, 0, -1, // (-1, 0)
-                -1, 0, -1, -1, // (1, 0)
-                0, -1, -1, -1, // (0, 1)
+                // top edge x=0 -> bottom halo of top neighbor
+                EXTENDED_CHUNK_SIZE as u32 + 1,
+                chunk_cells + ((EXTENDED_CHUNK_SIZE - 1) * EXTENDED_CHUNK_SIZE + 1) as u32,
+                0,
+                // left edge y=0 -> right halo of left neighbor
+                EXTENDED_CHUNK_SIZE as u32 + 1,
+                chunk_cells * 2 + (EXTENDED_CHUNK_SIZE * 1 + EXTENDED_CHUNK_SIZE - 1) as u32,
+                0,
+                // right edge y=0 -> left halo of right neighbor
+                EXTENDED_CHUNK_SIZE as u32 + CHUNK_SIZE as u32,
+                chunk_cells * 3 + EXTENDED_CHUNK_SIZE as u32,
+                0,
+                // bottom edge x=0 -> top halo of bottom neighbor
+                (CHUNK_SIZE * EXTENDED_CHUNK_SIZE + 1) as u32,
+                chunk_cells * 4 + 1,
+                0,
+            ]
+        );
+    }
+
+    #[test]
+    fn halo_ops_clear_missing_cardinal_neighbors() {
+        let ops = build_halo_ops(&[(0, 0)]);
+
+        assert_eq!(ops.len(), 4 * CHUNK_SIZE * HALO_OP_STRIDE);
+        assert_eq!(
+            &ops[0..12],
+            vec![
+                EXTENDED_CHUNK_SIZE as u32 + 1,
+                1,
+                HALO_OP_MISSING_NEIGHBOR,
+                EXTENDED_CHUNK_SIZE as u32 + 1,
+                EXTENDED_CHUNK_SIZE as u32,
+                HALO_OP_MISSING_NEIGHBOR,
+                EXTENDED_CHUNK_SIZE as u32 + CHUNK_SIZE as u32,
+                (EXTENDED_CHUNK_SIZE * 2 - 1) as u32,
+                HALO_OP_MISSING_NEIGHBOR,
+                (CHUNK_SIZE * EXTENDED_CHUNK_SIZE + 1) as u32,
+                ((EXTENDED_CHUNK_SIZE - 1) * EXTENDED_CHUNK_SIZE + 1) as u32,
+                HALO_OP_MISSING_NEIGHBOR,
             ]
         );
     }
