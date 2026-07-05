@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     fmt::{Debug, Display},
     time::Duration,
 };
@@ -137,7 +138,7 @@ pub trait CellGridEvaluator<
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    );
+    ) -> Result<(), Box<dyn Error>>;
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>);
 }
@@ -190,6 +191,37 @@ where
         }
     }
 
+    pub fn try_new_with_grid_evaluator(
+        make_grid_evaluator: impl FnOnce(
+            &RuleLUT<Config::State, Config::Neighborhood>,
+        ) -> Result<
+            Box<
+                dyn CellGridEvaluator<
+                        Config::State,
+                        Config::Neighborhood,
+                        RuleLUT<Config::State, Config::Neighborhood>,
+                    >,
+            >,
+            Box<dyn Error>,
+        >,
+    ) -> Result<Self, Box<dyn Error>> {
+        let start = std::time::Instant::now();
+        let rule_evaluator = RuleLUT::compute(&Config::Evaluator::default());
+        println!(
+            "LUT building for {} took {}ms",
+            Config::NAME,
+            start.elapsed().as_millis()
+        );
+        let grid_evaluator = make_grid_evaluator(&rule_evaluator)?;
+
+        Ok(Self {
+            storage: ChunkStorage::new(),
+            rule_evaluator,
+            grid_evaluator,
+            operation_times: Default::default(),
+        })
+    }
+
     #[allow(dead_code)]
     pub fn get_state(&self, x: isize, y: isize) -> Config::State {
         self.storage.get_state(x, y)
@@ -233,7 +265,8 @@ where
         self.storage.prepare_next_chunks();
         let (input, output) = self.storage.chunk_buffers();
         self.grid_evaluator
-            .evaluate_all(input, output, &self.rule_evaluator);
+            .evaluate_all(input, output, &self.rule_evaluator)
+            .expect("failed to evaluate cellular automaton grid");
         let t1 = std::time::Instant::now();
         self.storage.commit_next_chunks();
         self.grid_evaluator.rebuild_all_halos(&mut self.storage);

@@ -54,6 +54,10 @@ impl<State: CellState, Neighborhood: CellNeighborhood<State>> RuleLUT<State, Nei
         }
     }
 
+    pub(crate) fn values(&self) -> &[State] {
+        &self.lut
+    }
+
     #[inline(always)]
     fn to_index(state: State, neighbors: &Neighborhood) -> usize {
         // If these are not made const by the compiler, it will be slow

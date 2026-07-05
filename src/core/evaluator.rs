@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use super::{storage::*, types::*};
 
 use rayon::prelude::*;
@@ -217,11 +219,12 @@ where
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    ) {
+    ) -> Result<(), Box<dyn Error>> {
         assert_eq!(input.len(), output.len());
         for (chunk, output) in input.iter().zip(output) {
             evaluate_chunk(chunk, output, evaluator);
         }
+        Ok(())
     }
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
@@ -325,7 +328,7 @@ where
         input: &[Chunk<State>],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
-    ) {
+    ) -> Result<(), Box<dyn Error>> {
         assert_eq!(input.len(), output.len());
         self.pool.install(|| {
             input
@@ -337,6 +340,7 @@ where
                     }
                 })
         });
+        Ok(())
     }
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {

@@ -50,6 +50,10 @@ pub enum VonNeumannState {
     SpecialTransmissionQuiescentRight,
 }
 
+// SAFETY: `VonNeumannState` is a fieldless `#[repr(u8)]` enum. CUDA buffers only receive
+// values copied from host chunks or from the host-built LUT, both of which contain valid variants.
+unsafe impl cuda_core::DeviceCopy for VonNeumannState {}
+
 impl Display for VonNeumannState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Very imperfect, but GUI is the primary tool for working with this automaton

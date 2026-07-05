@@ -422,7 +422,7 @@ impl<State: CellState> ChunkStorage<State> {
 }
 
 #[allow(dead_code)]
-fn flatten_chunk_cells<State: CellState>(chunks: &[Chunk<State>]) -> &[State] {
+pub(crate) fn flatten_chunk_cells<State: CellState>(chunks: &[Chunk<State>]) -> &[State] {
     let len = chunks.len() * EXTENDED_CHUNK_CELLS;
     let ptr = chunks.as_ptr().cast::<State>();
     // SAFETY: `ChunkCells<State>` is `[State; EXTENDED_CHUNK_CELLS]`, arrays have contiguous
@@ -432,7 +432,9 @@ fn flatten_chunk_cells<State: CellState>(chunks: &[Chunk<State>]) -> &[State] {
 }
 
 #[allow(dead_code)]
-fn flatten_chunk_cells_mut<State: CellState>(chunks: &mut [Chunk<State>]) -> &mut [State] {
+pub(crate) fn flatten_chunk_cells_mut<State: CellState>(
+    chunks: &mut [Chunk<State>],
+) -> &mut [State] {
     let len = chunks.len() * EXTENDED_CHUNK_CELLS;
     let ptr = chunks.as_mut_ptr().cast::<State>();
     // SAFETY: `ChunkCells<State>` is `[State; EXTENDED_CHUNK_CELLS]`, arrays have contiguous
@@ -464,7 +466,9 @@ mod tests {
         let rule_evaluator = GameOfLifeEvaluator;
         storage.prepare_next_chunks();
         let (input, output) = storage.chunk_buffers();
-        grid_evaluator.evaluate_all(input, output, &rule_evaluator);
+        grid_evaluator
+            .evaluate_all(input, output, &rule_evaluator)
+            .expect("basic evaluator should not fail");
         storage.commit_next_chunks();
         rebuild_halos(storage);
     }

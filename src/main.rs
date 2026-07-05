@@ -12,6 +12,7 @@ use crate::{
         von_neumann::VonNeumann,
     },
     core::{
+        cuda_evaluator::CudaEvaluator,
         golly_loader,
         storage::{Chunk, FillNeighborhood},
         types::{CellularAutomataConfig, CellularAutomaton},
@@ -88,16 +89,25 @@ where
     );
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    if let Some(arg) = std::env::args().nth(1).as_ref()
-        && arg == "--cuda"
-    {
-        return crate::core::cuda_evaluator::main();
-    }
+fn cuda_enabled() -> bool {
+    std::env::var("VNSTUDIO_CUDA").as_deref() == Ok("1")
+}
 
+fn new_von_neumann() -> Result<VonNeumann, Box<dyn Error>> {
+    if cuda_enabled() {
+        println!("Using CUDA evaluator");
+        VonNeumann::try_new_with_grid_evaluator(|lut| {
+            Ok(Box::new(CudaEvaluator::new(lut.values().to_vec())?))
+        })
+    } else {
+        Ok(VonNeumann::new())
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = std::env::args().nth(1) {
         let pattern = golly_loader::load_jvn29_rle(PathBuf::from(path))?;
-        let mut automaton = VonNeumann::new();
+        let mut automaton = new_von_neumann()?;
         pattern.apply_to(&mut automaton);
 
         if let Some(arg) = std::env::args().nth(2)

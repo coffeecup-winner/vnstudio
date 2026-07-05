@@ -1,14 +1,15 @@
 use crate::core::{
-    evaluator::rebuild_all_halos_for_storage,
-    storage::{CHUNK_SIZE, Chunk, ChunkStorage, FillNeighborhood},
-    types::{CellGridEvaluator, CellNeighborhood, CellRuleEvaluator, CellState},
+    evaluator::rebuild_all_halos_for_storage, storage::{
+        CHUNK_SIZE, Chunk, ChunkStorage, FillNeighborhood, flatten_chunk_cells,
+        flatten_chunk_cells_mut,
+    }, types::{CellGridEvaluator, CellRuleEvaluator, CellState, VonNeumannNeighborhood}
 };
 
-use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, thread};
 use cuda_host::cuda_module;
 
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
 // Size of the chunk with the external borders
 const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
@@ -18,7 +19,11 @@ mod kernels {
     use super::*;
 
     #[kernel]
-    pub fn evaluate(lut: &[u8], chunk: &[u8], mut chunk_new: DisjointSlice<u8>) {
+    pub fn evaluate<State: CellState>(
+        lut: &[State],
+        chunk: &[State],
+        mut chunk_new: DisjointSlice<State>,
+    ) {
         let cuda_block_x = thread::blockIdx_x();
         let cuda_block_y = thread::blockIdx_y();
         let cuda_thread_x = thread::threadIdx_x();
@@ -48,15 +53,15 @@ mod kernels {
         let top = chunk[top_neighbor_index as usize];
         let bottom = chunk[bottom_neighbor_index as usize];
 
-        let mut lut_index = cell as usize;
+        let mut lut_index = Into::<u8>::into(cell) as usize;
         lut_index <<= 5;
-        lut_index |= top as usize;
+        lut_index |= Into::<u8>::into(top) as usize;
         lut_index <<= 5;
-        lut_index |= left as usize;
+        lut_index |= Into::<u8>::into(left) as usize;
         lut_index <<= 5;
-        lut_index |= right as usize;
+        lut_index |= Into::<u8>::into(right) as usize;
         lut_index <<= 5;
-        lut_index |= bottom as usize;
+        lut_index |= Into::<u8>::into(bottom) as usize;
 
         let new_value = lut[lut_index];
         unsafe {
@@ -65,23 +70,58 @@ mod kernels {
     }
 }
 
-pub struct CudaEvaluator;
+pub struct CudaEvaluator<State: CellState> {
+    _ctx: Arc<CudaContext>,
+    stream: Arc<CudaStream>,
+    module: kernels::LoadedModule,
+    lut: Vec<State>,
+}
 
-impl<
-    State: CellState,
-    Neighborhood: CellNeighborhood<State>,
-    Evaluator: CellRuleEvaluator<State, Neighborhood> + ?Sized,
-> CellGridEvaluator<State, Neighborhood, Evaluator> for CudaEvaluator
+impl<State: CellState, Evaluator: CellRuleEvaluator<State, VonNeumannNeighborhood<State>> + ?Sized>
+    CellGridEvaluator<State, VonNeumannNeighborhood<State>, Evaluator> for CudaEvaluator<State>
 where
-    Chunk<State>: FillNeighborhood<State, Neighborhood>,
+    State: DeviceCopy,
+    Chunk<State>: FillNeighborhood<State, VonNeumannNeighborhood<State>>,
 {
     fn evaluate_all(
         &mut self,
-        _input: &[Chunk<State>],
-        _output: &mut [Chunk<State>],
+        input: &[Chunk<State>],
+        output: &mut [Chunk<State>],
         _evaluator: &Evaluator,
-    ) {
-        todo!()
+    ) -> Result<(), Box<dyn Error>> {
+        assert_eq!(input.len(), output.len());
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        let input_flat = flatten_chunk_cells(input);
+        let output_flat = flatten_chunk_cells_mut(output);
+        let chunk_d = DeviceBuffer::from_host(&self.stream, input_flat)?;
+        let mut chunk_new_d = DeviceBuffer::from_host(&self.stream, output_flat)?;
+        let lut_d = DeviceBuffer::from_host(&self.stream, &self.lut)?;
+
+        let launch_config = LaunchConfig {
+            grid_dim: (
+                input.len() as u32 * (CHUNK_SIZE / 16) as u32,
+                (CHUNK_SIZE / 16) as u32,
+                1,
+            ),
+            block_dim: (16, 16, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.module.evaluate(
+                &self.stream,
+                launch_config,
+                &lut_d,
+                &chunk_d,
+                &mut chunk_new_d,
+            )?;
+        }
+        chunk_new_d.copy_to_host(&self.stream, output_flat)?;
+
+        Ok(())
     }
 
     fn rebuild_all_halos(&mut self, storage: &mut ChunkStorage<State>) {
@@ -89,39 +129,11 @@ where
     }
 }
 
-pub fn main() -> Result<(), Box<dyn Error>> {
-    let ctx = CudaContext::new(0)?;
-    let stream = ctx.default_stream();
-
-    let chunk = [0u8; 200 * EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE];
-    let chunk_new = [0u8; 200 * EXTENDED_CHUNK_SIZE * EXTENDED_CHUNK_SIZE];
-
-    let lut = vec![0; 32 * 1024 * 1024];
-
-    let chunk_d = DeviceBuffer::from_host(&stream, &chunk)?;
-    let mut chunk_new_d = DeviceBuffer::from_host(&stream, &chunk_new)?;
-    let lut_d = DeviceBuffer::from_host(&stream, &lut)?;
-
-    const NUM_ITERATIONS: usize = 10000;
-    let start = std::time::Instant::now();
-    let module = kernels::load(&ctx)?;
-    let launch_config = LaunchConfig {
-        grid_dim: (200 * (CHUNK_SIZE / 16) as u32, (CHUNK_SIZE / 16) as u32, 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
-    for _ in 0..NUM_ITERATIONS {
-        unsafe {
-            module.evaluate(&stream, launch_config, &lut_d, &chunk_d, &mut chunk_new_d)?;
-        }
-        stream.synchronize()?;
+impl<State: CellState> CudaEvaluator<State> {
+    pub fn new(lut: Vec<State>) -> Result<Self, Box<dyn Error>> {
+        let ctx = CudaContext::new(0)?;
+        let stream = ctx.default_stream();
+        let module = kernels::load(&ctx)?;
+        Ok(Self { _ctx: ctx, stream, module, lut })
     }
-    let end = std::time::Instant::now();
-    println!(
-        "{} iterations took {}ms",
-        NUM_ITERATIONS,
-        (end - start).as_millis()
-    );
-
-    Ok(())
 }
