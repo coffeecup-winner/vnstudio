@@ -1,15 +1,20 @@
 use crate::core::{
-    evaluator::rebuild_all_halos_for_storage, storage::{
+    evaluator::rebuild_all_halos_for_storage,
+    storage::{
         CHUNK_SIZE, Chunk, ChunkStorage, FillNeighborhood, flatten_chunk_cells,
         flatten_chunk_cells_mut,
-    }, types::{CellGridEvaluator, CellRuleEvaluator, CellState, VonNeumannNeighborhood}
+    },
+    types::{CellGridEvaluator, CellRuleEvaluator, CellState, VonNeumannNeighborhood},
 };
 
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig};
+use cuda_core::{
+    CudaContext, CudaFunction, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig,
+    launch_kernel_on_stream,
+};
 use cuda_device::{DisjointSlice, kernel, thread};
-use cuda_host::cuda_module;
+use cuda_host::{EmbeddedModuleError, cuda_module, load_kernel_module};
 
-use std::{error::Error, sync::Arc};
+use std::{error::Error, io, sync::Arc};
 
 // Size of the chunk with the external borders
 const EXTENDED_CHUNK_SIZE: usize = CHUNK_SIZE + 2;
@@ -73,8 +78,23 @@ mod kernels {
 pub struct CudaEvaluator<State: CellState> {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
-    module: kernels::LoadedModule,
+    module: LoadedCudaModule,
     lut: Vec<State>,
+}
+
+enum LoadedCudaModule {
+    Embedded(kernels::LoadedModule),
+    Sidecar(CudaFunction),
+}
+
+fn sidecar_kernel_name() -> Result<String, Box<dyn Error>> {
+    let ptx = std::fs::read_to_string("vnstudio.ptx")?;
+    let entry = ptx
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(".visible .entry "))
+        .and_then(|entry| entry.split('(').next())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "vnstudio.ptx has no entry"))?;
+    Ok(entry.to_owned())
 }
 
 impl<State: CellState, Evaluator: CellRuleEvaluator<State, VonNeumannNeighborhood<State>> + ?Sized>
@@ -111,13 +131,41 @@ where
         };
 
         unsafe {
-            self.module.evaluate(
-                &self.stream,
-                launch_config,
-                &lut_d,
-                &chunk_d,
-                &mut chunk_new_d,
-            )?;
+            match &self.module {
+                LoadedCudaModule::Embedded(module) => {
+                    module.evaluate(
+                        &self.stream,
+                        launch_config,
+                        &lut_d,
+                        &chunk_d,
+                        &mut chunk_new_d,
+                    )?;
+                }
+                LoadedCudaModule::Sidecar(module) => {
+                    let mut lut_ptr = lut_d.cu_deviceptr();
+                    let mut lut_len = lut_d.len() as u64;
+                    let mut chunk_ptr = chunk_d.cu_deviceptr();
+                    let mut chunk_len = chunk_d.len() as u64;
+                    let mut chunk_new_ptr = chunk_new_d.cu_deviceptr();
+                    let mut chunk_new_len = chunk_new_d.len() as u64;
+                    let mut args = [
+                        (&mut lut_ptr as *mut _) as *mut std::ffi::c_void,
+                        (&mut lut_len as *mut _) as *mut std::ffi::c_void,
+                        (&mut chunk_ptr as *mut _) as *mut std::ffi::c_void,
+                        (&mut chunk_len as *mut _) as *mut std::ffi::c_void,
+                        (&mut chunk_new_ptr as *mut _) as *mut std::ffi::c_void,
+                        (&mut chunk_new_len as *mut _) as *mut std::ffi::c_void,
+                    ];
+                    launch_kernel_on_stream(
+                        module,
+                        launch_config.grid_dim,
+                        launch_config.block_dim,
+                        launch_config.shared_mem_bytes,
+                        &self.stream,
+                        &mut args,
+                    )?;
+                }
+            }
         }
         chunk_new_d.copy_to_host(&self.stream, output_flat)?;
 
@@ -133,7 +181,19 @@ impl<State: CellState> CudaEvaluator<State> {
     pub fn new(lut: Vec<State>) -> Result<Self, Box<dyn Error>> {
         let ctx = CudaContext::new(0)?;
         let stream = ctx.default_stream();
-        let module = kernels::load(&ctx)?;
-        Ok(Self { _ctx: ctx, stream, module, lut })
+        let module = match kernels::load(&ctx) {
+            Ok(module) => LoadedCudaModule::Embedded(module),
+            Err(EmbeddedModuleError::NoModules) => {
+                let module = load_kernel_module(&ctx, "vnstudio")?;
+                LoadedCudaModule::Sidecar(module.load_function(&sidecar_kernel_name()?)?)
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        Ok(Self {
+            _ctx: ctx,
+            stream,
+            module,
+            lut,
+        })
     }
 }
