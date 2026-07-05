@@ -135,7 +135,6 @@ pub trait CellGridEvaluator<
     fn evaluate_all(
         &mut self,
         input: &[Chunk<State>],
-        coords: &[(isize, isize)],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
     );
@@ -232,9 +231,9 @@ where
     pub fn evaluate_next(&mut self) {
         let t0 = std::time::Instant::now();
         self.storage.prepare_next_chunks();
-        let (input, coords, output) = self.storage.chunk_buffers();
+        let (input, output) = self.storage.chunk_buffers();
         self.grid_evaluator
-            .evaluate_all(input, coords, output, &self.rule_evaluator);
+            .evaluate_all(input, output, &self.rule_evaluator);
         let t1 = std::time::Instant::now();
         self.storage.commit_next_chunks();
         self.grid_evaluator.rebuild_all_halos(&mut self.storage);

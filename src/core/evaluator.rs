@@ -215,12 +215,10 @@ where
     fn evaluate_all(
         &mut self,
         input: &[Chunk<State>],
-        coords: &[(isize, isize)],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
     ) {
         assert_eq!(input.len(), output.len());
-        assert_eq!(input.len(), coords.len());
         for (chunk, output) in input.iter().zip(output) {
             evaluate_chunk(chunk, output, evaluator);
         }
@@ -325,12 +323,10 @@ where
     fn evaluate_all(
         &mut self,
         input: &[Chunk<State>],
-        coords: &[(isize, isize)],
         output: &mut [Chunk<State>],
         evaluator: &Evaluator,
     ) {
         assert_eq!(input.len(), output.len());
-        assert_eq!(input.len(), coords.len());
         self.pool.install(|| {
             input
                 .par_chunks(CHUNKS_PER_TASK)

@@ -225,8 +225,8 @@ impl<State: CellState> ChunkStorage<State> {
         self.next_chunk_coords.extend_from_slice(&self.chunk_coords);
     }
 
-    pub fn chunk_buffers(&mut self) -> (&[Chunk<State>], &[(isize, isize)], &mut [Chunk<State>]) {
-        (&self.chunks, &self.chunk_coords, &mut self.next_chunks)
+    pub fn chunk_buffers(&mut self) -> (&[Chunk<State>], &mut [Chunk<State>]) {
+        (&self.chunks, &mut self.next_chunks)
     }
 
     pub fn commit_next_chunks(&mut self) {
@@ -463,8 +463,8 @@ mod tests {
         let mut grid_evaluator = BasicEvaluator;
         let rule_evaluator = GameOfLifeEvaluator;
         storage.prepare_next_chunks();
-        let (input, coords, output) = storage.chunk_buffers();
-        grid_evaluator.evaluate_all(input, coords, output, &rule_evaluator);
+        let (input, output) = storage.chunk_buffers();
+        grid_evaluator.evaluate_all(input, output, &rule_evaluator);
         storage.commit_next_chunks();
         rebuild_halos(storage);
     }
