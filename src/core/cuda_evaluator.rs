@@ -491,6 +491,20 @@ where
         Ok(())
     }
 
+    fn should_run_storage_deallocation(
+        &mut self,
+        storage: &mut ChunkStorage<State>,
+    ) -> Result<bool, Box<dyn Error>> {
+        if !self.host_synced && self.device_current.is_some() && self.last_halo_rebuild_on_device {
+            return Ok(false);
+        }
+
+        <Self as CellGridEvaluator<State, VonNeumannNeighborhood<State>, Evaluator>>::sync_to_host_if_needed(
+            self, storage,
+        )?;
+        Ok(true)
+    }
+
     fn storage_changed(&mut self) {
         self.invalidate_device_state();
     }

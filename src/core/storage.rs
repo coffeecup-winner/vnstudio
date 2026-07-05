@@ -423,6 +423,13 @@ impl<State: CellState> ChunkStorage<State> {
         false
     }
 
+    pub fn skip_deallocation_cycle(&mut self) {
+        self.cycles_since_chunk_deallocation += 1;
+        if self.cycles_since_chunk_deallocation >= CHUNK_DEALLOCATION_INTERVAL {
+            self.cycles_since_chunk_deallocation = 0;
+        }
+    }
+
     pub fn should_deallocate_next(&self) -> bool {
         self.cycles_since_chunk_deallocation + 1 >= CHUNK_DEALLOCATION_INTERVAL
     }
@@ -537,6 +544,27 @@ mod tests {
 
         storage.on_evaluate_next();
         assert_eq!(storage.chunks().len(), 0);
+    }
+
+    #[test]
+    fn skipped_deallocation_cycle_resets_configured_interval_without_mutating_chunks() {
+        let mut storage = ChunkStorage::<GameOfLifeState>::new();
+        storage.set_state(1, 1, GameOfLifeState::Live);
+        storage.set_state(1, 1, GameOfLifeState::Dead);
+
+        for _ in 0..CHUNK_DEALLOCATION_INTERVAL - 1 {
+            storage.on_evaluate_next();
+        }
+        assert!(storage.should_deallocate_next());
+
+        storage.skip_deallocation_cycle();
+
+        assert!(!storage.should_deallocate_next());
+        assert_eq!(storage.chunks().len(), 1);
+        for _ in 0..CHUNK_DEALLOCATION_INTERVAL - 1 {
+            storage.on_evaluate_next();
+        }
+        assert!(storage.should_deallocate_next());
     }
 
     #[test]

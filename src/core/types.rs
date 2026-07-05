@@ -154,6 +154,14 @@ pub trait CellGridEvaluator<
         Ok(())
     }
 
+    fn should_run_storage_deallocation(
+        &mut self,
+        storage: &mut ChunkStorage<State>,
+    ) -> Result<bool, Box<dyn Error>> {
+        self.sync_to_host_if_needed(storage)?;
+        Ok(true)
+    }
+
     fn storage_changed(&mut self) {}
 
     fn reset_stats(&mut self) {}
@@ -312,12 +320,20 @@ where
         self.storage.commit_next_chunks();
         self.grid_evaluator.rebuild_all_halos(&mut self.storage);
         let t2 = std::time::Instant::now();
-        if self.storage.should_deallocate_next() {
+        let should_run_deallocation = if self.storage.should_deallocate_next() {
             self.grid_evaluator
-                .sync_to_host_if_needed(&mut self.storage)
-                .expect("failed to synchronize cellular automaton storage before deallocation");
-        }
-        if self.storage.on_evaluate_next() {
+                .should_run_storage_deallocation(&mut self.storage)
+                .expect("failed to determine whether storage deallocation should run")
+        } else {
+            true
+        };
+        let topology_changed = if should_run_deallocation {
+            self.storage.on_evaluate_next()
+        } else {
+            self.storage.skip_deallocation_cycle();
+            false
+        };
+        if topology_changed {
             self.grid_evaluator
                 .rebuild_all_halos_after_topology_change(&mut self.storage);
         }
