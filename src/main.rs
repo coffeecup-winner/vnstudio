@@ -2,18 +2,13 @@ mod automata;
 mod core;
 mod gui;
 
-use std::{error::Error, path::PathBuf};
+use std::{collections::BTreeSet, error::Error, path::PathBuf};
 
-use gui::app::VnStudioApp;
+use gui::app::{ActiveAutomaton, VnStudioApp, load_pattern_from_path};
 
 use crate::{
-    automata::{
-        game_of_life::{GameOfLife, GameOfLifeState},
-        von_neumann::VonNeumann,
-    },
+    automata::game_of_life::{GameOfLife, GameOfLifeState},
     core::{
-        cuda_evaluator::CudaEvaluator,
-        golly_loader,
         storage::{Chunk, FillNeighborhood},
         types::{CellularAutomataConfig, CellularAutomaton},
     },
@@ -27,11 +22,11 @@ fn seed_game_of_life(automaton: &mut GameOfLife) {
     automaton.set_state(2, 2, GameOfLifeState::Live);
 }
 
-fn run_app<Config>(automaton: CellularAutomaton<Config>) -> eframe::Result<()>
-where
-    Config: CellularAutomataConfig,
-    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
-{
+fn run_app(
+    automaton: ActiveAutomaton,
+    breakpoints: BTreeSet<(isize, isize)>,
+    current_path: Option<PathBuf>,
+) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
         ..Default::default()
@@ -41,7 +36,12 @@ where
         "VNStudio",
         options,
         Box::new(move |creation_context| {
-            Ok(Box::new(VnStudioApp::new(creation_context, automaton)))
+            Ok(Box::new(VnStudioApp::new(
+                creation_context,
+                automaton,
+                breakpoints,
+                current_path,
+            )))
         }),
     )
 }
@@ -91,39 +91,30 @@ where
     automaton.print_evaluator_stats();
 }
 
-fn cuda_enabled() -> bool {
-    std::env::var("VNSTUDIO_CUDA").as_deref() == Ok("1")
-}
-
-fn new_von_neumann() -> Result<VonNeumann, Box<dyn Error>> {
-    if cuda_enabled() {
-        println!("Using CUDA evaluator");
-        VonNeumann::try_new_with_grid_evaluator(|lut| {
-            Ok(Box::new(CudaEvaluator::new(lut.values().to_vec())?))
-        })
-    } else {
-        Ok(VonNeumann::new())
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = std::env::args().nth(1) {
-        let pattern = golly_loader::load_jvn29_rle(PathBuf::from(path))?;
-        let mut automaton = new_von_neumann()?;
-        pattern.apply_to(&mut automaton);
+        let path = PathBuf::from(path);
+        let (automaton, breakpoints) = load_pattern_from_path(&path)?;
 
         if let Some(arg) = std::env::args().nth(2)
             && arg == "--bench"
         {
+            let ActiveAutomaton::JvN29(automaton) = automaton else {
+                return Err("--bench is only supported for JvN29 patterns".into());
+            };
             benchmark(automaton);
             return Ok(());
         }
 
-        run_app(automaton)?;
+        run_app(automaton, breakpoints, Some(path))?;
     } else {
         let mut automaton = GameOfLife::new();
         seed_game_of_life(&mut automaton);
-        run_app(automaton)?;
+        run_app(
+            ActiveAutomaton::GameOfLife(automaton),
+            BTreeSet::new(),
+            None,
+        )?;
     }
 
     Ok(())

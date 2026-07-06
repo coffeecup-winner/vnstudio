@@ -268,6 +268,16 @@ where
         self.storage.visit_non_default_cells(min, max, visitor);
     }
 
+    pub fn visit_all_non_default_cells(
+        &mut self,
+        visitor: impl FnMut(isize, isize, Config::State),
+    ) {
+        self.grid_evaluator
+            .sync_to_host_if_needed(&mut self.storage)
+            .expect("failed to synchronize cellular automaton storage");
+        self.storage.visit_all_non_default_cells(visitor);
+    }
+
     pub fn operation_times(&self) -> &CellularAutomatonOperationTimes {
         &self.operation_times
     }

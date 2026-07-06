@@ -1,5 +1,10 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    error::Error,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
 
@@ -8,9 +13,18 @@ use eframe::egui::{
     TextureOptions, Ui, Vec2,
 };
 
-use crate::core::{
-    storage::{Chunk, FillNeighborhood},
-    types::{CellStateVisuals, CellularAutomataConfig, CellularAutomaton},
+use crate::{
+    automata::{game_of_life::GameOfLife, von_neumann::VonNeumann},
+    core::{
+        cuda_evaluator::CudaEvaluator,
+        golly_loader,
+        storage::{Chunk, FillNeighborhood},
+        types::{CellStateVisuals, CellularAutomataConfig, CellularAutomaton},
+        vns_format::{
+            self, LoadedVnsPattern, PatternCells, apply_game_of_life_cells, apply_jvn29_cells,
+            game_of_life_cells_from_automaton, jvn29_cells_from_automaton,
+        },
+    },
 };
 
 use super::svg_glyph::SvgGlyph;
@@ -25,8 +39,8 @@ const REALTIME_FRAME_BUDGET: Duration = Duration::from_millis(12);
 const REPAINT_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const BASE_TITLE: &str = "VNStudio";
 
-pub struct VnStudioApp<Config: CellularAutomataConfig> {
-    automaton: CellularAutomaton<Config>,
+pub struct VnStudioApp {
+    automaton: ActiveAutomaton,
     zoom: f32,
     pan: Vec2,
     glyphs: HashMap<u8, SvgGlyph>,
@@ -43,16 +57,118 @@ pub struct VnStudioApp<Config: CellularAutomataConfig> {
     updates_this_window: u32,
     last_title: Option<String>,
     breakpoints: BTreeSet<(isize, isize)>,
-    last_breakpoint_hit: Option<BreakpointHit<Config::State>>,
+    last_breakpoint_hit: Option<BreakpointHit>,
+    status_message: Option<String>,
+    current_path: Option<PathBuf>,
+    pending_file_dialog: Option<PendingFileDialog>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BreakpointHit<State> {
+pub enum ActiveAutomaton {
+    JvN29(VonNeumann),
+    GameOfLife(GameOfLife),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BreakpointHit {
     x: isize,
     y: isize,
-    old_state: State,
-    new_state: State,
+    old_state: String,
+    new_state: String,
     generation: u64,
+}
+
+enum PendingFileDialog {
+    Load(Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>),
+    Save(Pin<Box<dyn Future<Output = Option<rfd::FileHandle>>>>),
+}
+
+enum CompletedFileDialog {
+    Load(Option<PathBuf>),
+    Save(Option<PathBuf>),
+}
+
+impl PendingFileDialog {
+    fn poll(&mut self) -> Poll<CompletedFileDialog> {
+        let waker = std::task::Waker::noop();
+        let mut context = TaskContext::from_waker(waker);
+        match self {
+            Self::Load(future) => future
+                .as_mut()
+                .poll(&mut context)
+                .map(|handle| CompletedFileDialog::Load(handle.map(PathBuf::from))),
+            Self::Save(future) => future
+                .as_mut()
+                .poll(&mut context)
+                .map(|handle| CompletedFileDialog::Save(handle.map(PathBuf::from))),
+        }
+    }
+}
+
+impl ActiveAutomaton {
+    pub fn new_jvn29() -> Result<Self, Box<dyn Error>> {
+        if std::env::var("VNSTUDIO_CUDA").as_deref() == Ok("1") {
+            Ok(Self::JvN29(VonNeumann::try_new_with_grid_evaluator(
+                |lut| Ok(Box::new(CudaEvaluator::new(lut.values().to_vec())?)),
+            )?))
+        } else {
+            Ok(Self::JvN29(VonNeumann::new()))
+        }
+    }
+
+    pub fn from_loaded_vns(pattern: LoadedVnsPattern) -> Result<Self, Box<dyn Error>> {
+        match pattern.cells {
+            PatternCells::JvN29(cells) => {
+                let mut automaton = match Self::new_jvn29()? {
+                    Self::JvN29(automaton) => automaton,
+                    Self::GameOfLife(_) => unreachable!("new_jvn29 must return JvN29"),
+                };
+                apply_jvn29_cells(&cells, &mut automaton);
+                Ok(Self::JvN29(automaton))
+            }
+            PatternCells::GameOfLife(cells) => {
+                let mut automaton = GameOfLife::new();
+                apply_game_of_life_cells(&cells, &mut automaton);
+                Ok(Self::GameOfLife(automaton))
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::JvN29(_) => "JvN29",
+            Self::GameOfLife(_) => "Game of Life",
+        }
+    }
+
+    fn chunk_count(&mut self) -> usize {
+        match self {
+            Self::JvN29(automaton) => automaton.chunk_count(),
+            Self::GameOfLife(automaton) => automaton.chunk_count(),
+        }
+    }
+
+    fn evaluate_next(&mut self) {
+        match self {
+            Self::JvN29(automaton) => automaton.evaluate_next(),
+            Self::GameOfLife(automaton) => automaton.evaluate_next(),
+        }
+    }
+
+    fn get_state_display(&mut self, x: isize, y: isize) -> String {
+        match self {
+            Self::JvN29(automaton) => automaton.get_state(x, y).to_string(),
+            Self::GameOfLife(automaton) => automaton.get_state(x, y).to_string(),
+        }
+    }
+
+    fn to_pattern_cells(&mut self) -> PatternCells {
+        match self {
+            Self::JvN29(automaton) => PatternCells::JvN29(jvn29_cells_from_automaton(automaton)),
+            Self::GameOfLife(automaton) => {
+                PatternCells::GameOfLife(game_of_life_cells_from_automaton(automaton))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,13 +199,12 @@ impl SimulationSpeed {
     }
 }
 
-impl<Config: CellularAutomataConfig> VnStudioApp<Config>
-where
-    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
-{
+impl VnStudioApp {
     pub fn new(
         _creation_context: &eframe::CreationContext<'_>,
-        automaton: CellularAutomaton<Config>,
+        automaton: ActiveAutomaton,
+        breakpoints: BTreeSet<(isize, isize)>,
+        current_path: Option<PathBuf>,
     ) -> Self {
         Self {
             automaton,
@@ -108,19 +223,162 @@ where
             ups_window_start: 0.0,
             updates_this_window: 0,
             last_title: None,
-            breakpoints: BTreeSet::new(),
+            breakpoints,
             last_breakpoint_hit: None,
+            status_message: None,
+            current_path,
+            pending_file_dialog: None,
         }
+    }
+
+    fn open_load_dialog(&mut self, ctx: &Context) {
+        if self.pending_file_dialog.is_some() {
+            return;
+        }
+
+        let dialog = self
+            .dialog_with_current_directory(rfd::AsyncFileDialog::new())
+            .add_filter("VNStudio pattern", &["vns"])
+            .add_filter("Golly RLE", &["rle"]);
+        self.pending_file_dialog = Some(PendingFileDialog::Load(Box::pin(dialog.pick_file())));
+        self.status_message = Some("Opening load dialog...".to_string());
+        ctx.request_repaint_after(REPAINT_INTERVAL);
+    }
+
+    fn finish_load_dialog(&mut self, path: PathBuf, ctx: &Context) {
+        match load_pattern_from_path(&path) {
+            Ok((automaton, breakpoints)) => {
+                self.automaton = automaton;
+                self.breakpoints = breakpoints;
+                self.current_path = Some(path.clone());
+                self.after_pattern_replaced(ctx);
+                self.status_message = Some(format!("Loaded {}", path.display()));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Load failed: {error}"));
+            }
+        }
+    }
+
+    fn open_save_dialog(&mut self, ctx: &Context) {
+        if self.pending_file_dialog.is_some() {
+            return;
+        }
+
+        let (directory, file_name) = self.next_save_suggestion();
+        let mut dialog = rfd::AsyncFileDialog::new().add_filter("VNStudio pattern", &["vns"]);
+        if let Some(directory) = directory {
+            dialog = dialog.set_directory(directory);
+        }
+        dialog = dialog.set_file_name(file_name);
+        self.pending_file_dialog = Some(PendingFileDialog::Save(Box::pin(dialog.save_file())));
+        self.status_message = Some("Opening save dialog...".to_string());
+        ctx.request_repaint_after(REPAINT_INTERVAL);
+    }
+
+    fn finish_save_dialog(&mut self, path: PathBuf) {
+        let path = with_vns_extension(path);
+        let pattern = self.automaton.to_pattern_cells();
+        match vns_format::save_vns(&path, pattern, &self.breakpoints) {
+            Ok(()) => {
+                self.current_path = Some(path.clone());
+                self.status_message = Some(format!("Saved {}", path.display()));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Save failed: {error}"));
+            }
+        }
+    }
+
+    fn poll_file_dialog(&mut self, ctx: &Context) {
+        let Some(pending) = &mut self.pending_file_dialog else {
+            return;
+        };
+
+        match pending.poll() {
+            Poll::Ready(completed) => {
+                self.pending_file_dialog = None;
+                match completed {
+                    CompletedFileDialog::Load(Some(path)) => self.finish_load_dialog(path, ctx),
+                    CompletedFileDialog::Load(None) => {
+                        self.status_message = Some("Load canceled".to_string());
+                    }
+                    CompletedFileDialog::Save(Some(path)) => self.finish_save_dialog(path),
+                    CompletedFileDialog::Save(None) => {
+                        self.status_message = Some("Save canceled".to_string());
+                    }
+                }
+            }
+            Poll::Pending => {
+                ctx.request_repaint_after(REPAINT_INTERVAL);
+            }
+        }
+    }
+
+    fn dialog_with_current_directory(&self, dialog: rfd::AsyncFileDialog) -> rfd::AsyncFileDialog {
+        self.current_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map_or(dialog.clone(), |directory| dialog.set_directory(directory))
+    }
+
+    fn next_save_suggestion(&self) -> (Option<&Path>, String) {
+        if let Some(path) = &self.current_path {
+            let save_path = with_vns_extension(path.clone());
+            let directory = path.parent();
+            let file_name = save_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("pattern.vns")
+                .to_string();
+            (directory, file_name)
+        } else {
+            (None, "pattern.vns".to_string())
+        }
+    }
+
+    fn after_pattern_replaced(&mut self, ctx: &Context) {
+        self.glyphs.clear();
+        self.pixel_texture = None;
+        self.pixel_texture_bounds = None;
+        self.pixel_texture_generation = u64::MAX;
+        self.simulation_generation = 0;
+        self.is_running = false;
+        self.last_breakpoint_hit = None;
+        self.reset_timing(ctx.input(|input| input.time));
+        self.publish_title(ctx, None);
+        ctx.request_repaint();
     }
 
     fn draw_tools(&mut self, ui: &mut Ui) {
         ui.heading("VNStudio");
+        ui.label(self.automaton.name());
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            let dialog_pending = self.pending_file_dialog.is_some();
+            if ui
+                .add_enabled(!dialog_pending, egui::Button::new("Load..."))
+                .clicked()
+            {
+                self.open_load_dialog(ui.ctx());
+            }
+            if ui
+                .add_enabled(!dialog_pending, egui::Button::new("Save..."))
+                .clicked()
+            {
+                self.open_save_dialog(ui.ctx());
+            }
+        });
+        if let Some(message) = &self.status_message {
+            ui.label(message);
+        }
         ui.separator();
 
         egui::CollapsingHeader::new("Breakpoints")
             .default_open(true)
             .show(ui, |ui| {
-                if let Some(hit) = self.last_breakpoint_hit {
+                if let Some(hit) = &self.last_breakpoint_hit {
                     ui.label(format!(
                         "Paused at ({}, {}) on iteration {}: {} -> {}",
                         hit.x, hit.y, hit.generation, hit.old_state, hit.new_state
@@ -269,24 +527,24 @@ where
         self.reset_timing(now);
     }
 
-    fn breakpoint_states(&mut self) -> Vec<((isize, isize), Config::State)> {
+    fn breakpoint_states(&mut self) -> Vec<((isize, isize), String)> {
         self.breakpoints
             .iter()
-            .map(|&(x, y)| ((x, y), self.automaton.get_state(x, y)))
+            .map(|&(x, y)| ((x, y), self.automaton.get_state_display(x, y)))
             .collect()
     }
 
     fn first_changed_breakpoint(
         &mut self,
-        states_before: &[((isize, isize), Config::State)],
+        states_before: &[((isize, isize), String)],
         generation: u64,
-    ) -> Option<BreakpointHit<Config::State>> {
-        states_before.iter().find_map(|&((x, y), old_state)| {
-            let new_state = self.automaton.get_state(x, y);
-            breakpoint_state_changed(old_state, new_state).then_some(BreakpointHit {
-                x,
-                y,
-                old_state,
+    ) -> Option<BreakpointHit> {
+        states_before.iter().find_map(|((x, y), old_state)| {
+            let new_state = self.automaton.get_state_display(*x, *y);
+            breakpoint_state_changed(old_state, &new_state).then_some(BreakpointHit {
+                x: *x,
+                y: *y,
+                old_state: old_state.clone(),
                 new_state,
                 generation,
             })
@@ -363,6 +621,7 @@ where
             self.breakpoints.remove(&cell);
             if self
                 .last_breakpoint_hit
+                .as_ref()
                 .is_some_and(|hit| (hit.x, hit.y) == cell)
             {
                 self.last_breakpoint_hit = None;
@@ -394,7 +653,10 @@ where
             || self.pixel_texture_generation != self.simulation_generation;
 
         if texture_is_stale {
-            let image = build_pixel_image(&mut self.automaton, &visible);
+            let image = match &mut self.automaton {
+                ActiveAutomaton::JvN29(automaton) => build_pixel_image(automaton, &visible),
+                ActiveAutomaton::GameOfLife(automaton) => build_pixel_image(automaton, &visible),
+            };
 
             if let Some(texture) = &mut self.pixel_texture {
                 texture.set(image, TextureOptions::NEAREST);
@@ -436,43 +698,22 @@ where
     fn paint_svg_cells(&mut self, rect: Rect, painter: &egui::Painter) {
         let visible = visible_cell_range(rect, self.pan, self.zoom);
         let padding = if self.zoom >= 12.0 { 2.0 } else { 0.5 };
-        let automaton = &mut self.automaton;
         let glyphs = &mut self.glyphs;
 
-        automaton.visit_non_default_cells(
-            (visible.min_x, visible.min_y),
-            (visible.max_x, visible.max_y),
-            |x, y, state| {
-                let cell_rect = cell_rect(rect, self.pan, self.zoom, x, y).shrink(padding);
-                if let Some(glyph) = Self::glyph_for(glyphs, state) {
-                    glyph.paint(painter, cell_rect);
-                }
-            },
-        );
+        match &mut self.automaton {
+            ActiveAutomaton::JvN29(automaton) => paint_svg_cells_for(
+                automaton, glyphs, rect, self.pan, self.zoom, padding, painter, &visible,
+            ),
+            ActiveAutomaton::GameOfLife(automaton) => paint_svg_cells_for(
+                automaton, glyphs, rect, self.pan, self.zoom, padding, painter, &visible,
+            ),
+        }
     }
 
     fn snap_pan_to_logical_pixels(&mut self, rect: Rect) {
         let origin = rect.center() + self.pan;
         let snapped_origin = Pos2::new(origin.x.round(), origin.y.round());
         self.pan = snapped_origin - rect.center();
-    }
-
-    fn glyph_for(glyphs: &mut HashMap<u8, SvgGlyph>, state: Config::State) -> Option<&SvgGlyph> {
-        let key: u8 = state.into();
-        if let std::collections::hash_map::Entry::Vacant(entry) = glyphs.entry(key) {
-            let svg = state.glyph_svg()?;
-            match SvgGlyph::parse(svg) {
-                Ok(glyph) => {
-                    entry.insert(glyph);
-                }
-                Err(err) => {
-                    eprintln!("failed to parse glyph for state {state}: {err}");
-                    return None;
-                }
-            }
-        }
-
-        glyphs.get(&key)
     }
 
     fn paint_grid(&self, rect: Rect, painter: &egui::Painter) {
@@ -528,11 +769,9 @@ where
     }
 }
 
-impl<Config: CellularAutomataConfig> eframe::App for VnStudioApp<Config>
-where
-    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
-{
+impl eframe::App for VnStudioApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.poll_file_dialog(ctx);
         self.update_simulation(ctx);
 
         egui::SidePanel::left("tools")
@@ -543,6 +782,84 @@ where
 
         egui::CentralPanel::default().show(ctx, |ui| self.draw_canvas(ui, ctx));
     }
+}
+
+fn paint_svg_cells_for<Config: CellularAutomataConfig>(
+    automaton: &mut CellularAutomaton<Config>,
+    glyphs: &mut HashMap<u8, SvgGlyph>,
+    rect: Rect,
+    pan: Vec2,
+    zoom: f32,
+    padding: f32,
+    painter: &egui::Painter,
+    visible: &VisibleCellRange,
+) where
+    Chunk<Config::State>: FillNeighborhood<Config::State, Config::Neighborhood>,
+{
+    automaton.visit_non_default_cells(
+        (visible.min_x, visible.min_y),
+        (visible.max_x, visible.max_y),
+        |x, y, state| {
+            let cell_rect = cell_rect(rect, pan, zoom, x, y).shrink(padding);
+            if let Some(glyph) = glyph_for(glyphs, state) {
+                glyph.paint(painter, cell_rect);
+            }
+        },
+    );
+}
+
+fn glyph_for<State: crate::core::types::CellState>(
+    glyphs: &mut HashMap<u8, SvgGlyph>,
+    state: State,
+) -> Option<&SvgGlyph> {
+    let key: u8 = state.into();
+    if let std::collections::hash_map::Entry::Vacant(entry) = glyphs.entry(key) {
+        let svg = state.glyph_svg()?;
+        match SvgGlyph::parse(svg) {
+            Ok(glyph) => {
+                entry.insert(glyph);
+            }
+            Err(err) => {
+                eprintln!("failed to parse glyph for state {state}: {err}");
+                return None;
+            }
+        }
+    }
+
+    glyphs.get(&key)
+}
+
+pub fn load_pattern_from_path(
+    path: &Path,
+) -> Result<(ActiveAutomaton, BTreeSet<(isize, isize)>), Box<dyn Error>> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vns"))
+    {
+        let loaded = vns_format::load_vns(path)?;
+        let breakpoints = loaded.breakpoints.clone();
+        return Ok((ActiveAutomaton::from_loaded_vns(loaded)?, breakpoints));
+    }
+
+    let pattern = golly_loader::load_jvn29_rle(path)?;
+    let mut automaton = match ActiveAutomaton::new_jvn29()? {
+        ActiveAutomaton::JvN29(automaton) => automaton,
+        ActiveAutomaton::GameOfLife(_) => unreachable!("new_jvn29 must return JvN29"),
+    };
+    pattern.apply_to(&mut automaton);
+    Ok((ActiveAutomaton::JvN29(automaton), BTreeSet::new()))
+}
+
+fn with_vns_extension(mut path: PathBuf) -> PathBuf {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("vns"))
+    {
+        path.set_extension("vns");
+    }
+    path
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -714,6 +1031,22 @@ mod tests {
             GameOfLifeState::Dead,
             GameOfLifeState::Live
         ));
+    }
+
+    #[test]
+    fn save_paths_use_vns_extension() {
+        assert_eq!(
+            with_vns_extension(PathBuf::from("pattern")),
+            PathBuf::from("pattern.vns")
+        );
+        assert_eq!(
+            with_vns_extension(PathBuf::from("pattern.rle")),
+            PathBuf::from("pattern.vns")
+        );
+        assert_eq!(
+            with_vns_extension(PathBuf::from("pattern.vns")),
+            PathBuf::from("pattern.vns")
+        );
     }
 
     #[test]

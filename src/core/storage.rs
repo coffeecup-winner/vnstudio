@@ -317,6 +317,26 @@ impl<State: CellState> ChunkStorage<State> {
         }
     }
 
+    pub fn visit_all_non_default_cells(&self, mut visitor: impl FnMut(isize, isize, State)) {
+        for (&(chunk_x, chunk_y), chunk) in self.chunk_coords.iter().zip(&self.chunks) {
+            let world_min_x = chunk_x * CHUNK_SIZE as isize;
+            let world_min_y = chunk_y * CHUNK_SIZE as isize;
+
+            for cell_y in 0..CHUNK_SIZE {
+                for cell_x in 0..CHUNK_SIZE {
+                    let state = get_interior_state(chunk, cell_x, cell_y);
+                    if state != State::default() {
+                        visitor(
+                            world_min_x + cell_x as isize,
+                            world_min_y + cell_y as isize,
+                            state,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn set_state_core(
         &mut self,
         chunk_x: isize,
