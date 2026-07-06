@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
@@ -42,6 +42,17 @@ pub struct VnStudioApp<Config: CellularAutomataConfig> {
     ups_window_start: f64,
     updates_this_window: u32,
     last_title: Option<String>,
+    breakpoints: BTreeSet<(isize, isize)>,
+    last_breakpoint_hit: Option<BreakpointHit<Config::State>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BreakpointHit<State> {
+    x: isize,
+    y: isize,
+    old_state: State,
+    new_state: State,
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +108,8 @@ where
             ups_window_start: 0.0,
             updates_this_window: 0,
             last_title: None,
+            breakpoints: BTreeSet::new(),
+            last_breakpoint_hit: None,
         }
     }
 
@@ -107,7 +120,30 @@ where
         egui::CollapsingHeader::new("Breakpoints")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label("No breakpoints");
+                if let Some(hit) = self.last_breakpoint_hit {
+                    ui.label(format!(
+                        "Paused at ({}, {}) on iteration {}: {} -> {}",
+                        hit.x, hit.y, hit.generation, hit.old_state, hit.new_state
+                    ));
+                    ui.separator();
+                }
+
+                if self.breakpoints.is_empty() {
+                    ui.label("No breakpoints");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} breakpoint(s)", self.breakpoints.len()));
+                        if ui.button("Clear").clicked() {
+                            self.breakpoints.clear();
+                            self.last_breakpoint_hit = None;
+                        }
+                    });
+                    ui.separator();
+
+                    for &(x, y) in &self.breakpoints {
+                        ui.label(format!("({}, {})", x, y));
+                    }
+                }
             });
 
         egui::CollapsingHeader::new("State Inspection")
@@ -127,9 +163,15 @@ where
                     }
 
                     if ui.button("Step").clicked() {
-                        self.step_simulation();
+                        let breakpoint_hit = self.step_simulation();
+                        if breakpoint_hit {
+                            self.pause_after_breakpoint(ui.ctx().input(|input| input.time));
+                        }
                         self.publish_title(ui.ctx(), None);
-                        if self.is_running && self.speed == SimulationSpeed::Realtime {
+                        if self.last_breakpoint_hit.is_none()
+                            && self.is_running
+                            && self.speed == SimulationSpeed::Realtime
+                        {
                             self.updates_this_window += 1;
                         }
                     }
@@ -179,7 +221,10 @@ where
                             FIXED_SPEED_MAX_STEPS_PER_FRAME,
                         );
                         for _ in 0..steps {
-                            self.step_simulation();
+                            if self.step_simulation() {
+                                self.pause_after_breakpoint(now);
+                                break;
+                            }
                         }
                     }
                 }
@@ -196,7 +241,10 @@ where
         let mut steps = 0;
 
         loop {
-            self.step_simulation();
+            if self.step_simulation() {
+                self.pause_after_breakpoint(self.last_update_time.unwrap_or(0.0));
+                break;
+            }
             steps += 1;
 
             if start.elapsed() >= REALTIME_FRAME_BUDGET {
@@ -207,9 +255,42 @@ where
         self.updates_this_window += steps;
     }
 
-    fn step_simulation(&mut self) {
+    fn step_simulation(&mut self) -> bool {
+        let breakpoint_states_before = self.breakpoint_states();
         self.automaton.evaluate_next();
         self.simulation_generation = self.simulation_generation.wrapping_add(1);
+        self.last_breakpoint_hit =
+            self.first_changed_breakpoint(&breakpoint_states_before, self.simulation_generation);
+        self.last_breakpoint_hit.is_some()
+    }
+
+    fn pause_after_breakpoint(&mut self, now: f64) {
+        self.is_running = false;
+        self.reset_timing(now);
+    }
+
+    fn breakpoint_states(&mut self) -> Vec<((isize, isize), Config::State)> {
+        self.breakpoints
+            .iter()
+            .map(|&(x, y)| ((x, y), self.automaton.get_state(x, y)))
+            .collect()
+    }
+
+    fn first_changed_breakpoint(
+        &mut self,
+        states_before: &[((isize, isize), Config::State)],
+        generation: u64,
+    ) -> Option<BreakpointHit<Config::State>> {
+        states_before.iter().find_map(|&((x, y), old_state)| {
+            let new_state = self.automaton.get_state(x, y);
+            breakpoint_state_changed(old_state, new_state).then_some(BreakpointHit {
+                x,
+                y,
+                old_state,
+                new_state,
+                generation,
+            })
+        })
     }
 
     fn update_title(&mut self, ctx: &Context, now: f64) {
@@ -240,7 +321,7 @@ where
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui, ctx: &Context) {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
         painter.rect_filled(rect, 0.0, Color32::from_gray(248));
@@ -264,8 +345,29 @@ where
             ctx.request_repaint();
         }
 
+        if response.clicked_by(PointerButton::Secondary)
+            && let Some(pointer_pos) = response.interact_pointer_pos()
+        {
+            self.toggle_breakpoint_at(rect, pointer_pos);
+        }
+
         self.paint_cells(rect, &painter, ctx);
         self.paint_grid(rect, &painter);
+        self.paint_breakpoints(rect, &painter);
+    }
+
+    fn toggle_breakpoint_at(&mut self, rect: Rect, pointer_pos: Pos2) {
+        let world = screen_to_world(rect, self.pan, self.zoom, pointer_pos);
+        let cell = (world.x.floor() as isize, world.y.floor() as isize);
+        if !self.breakpoints.insert(cell) {
+            self.breakpoints.remove(&cell);
+            if self
+                .last_breakpoint_hit
+                .is_some_and(|hit| (hit.x, hit.y) == cell)
+            {
+                self.last_breakpoint_hit = None;
+            }
+        }
     }
 
     fn zoom_around(&mut self, rect: Rect, cursor: Pos2, scroll_y: f32) {
@@ -407,6 +509,23 @@ where
             );
         }
     }
+
+    fn paint_breakpoints(&self, rect: Rect, painter: &egui::Painter) {
+        let visible = visible_cell_range(rect, self.pan, self.zoom);
+        let stroke = Stroke::new(2.0, Color32::from_rgb(220, 20, 60));
+
+        for &(x, y) in self.breakpoints.iter().filter(|&&(x, y)| {
+            x >= visible.min_x && x <= visible.max_x && y >= visible.min_y && y <= visible.max_y
+        }) {
+            let cell = cell_rect(rect, self.pan, self.zoom, x, y).shrink(2.0);
+            painter.rect_stroke(cell, 0.0, stroke, egui::StrokeKind::Inside);
+
+            if self.zoom > PIXEL_RENDERING_THRESHOLD {
+                let size = (self.zoom * 0.18).clamp(3.0, 8.0);
+                painter.circle_filled(cell.left_top() + Vec2::splat(size), size, stroke.color);
+            }
+        }
+    }
 }
 
 impl<Config: CellularAutomataConfig> eframe::App for VnStudioApp<Config>
@@ -473,6 +592,10 @@ fn fixed_steps_due(
     let steps = steps.min(max_steps);
     *accumulator -= steps as f64;
     steps
+}
+
+fn breakpoint_state_changed<State: Eq>(old_state: State, new_state: State) -> bool {
+    old_state != new_state
 }
 
 fn build_pixel_image<Config: CellularAutomataConfig>(
@@ -579,6 +702,18 @@ mod tests {
 
         assert_eq!(fixed_steps_due(&mut accumulator, 10.0, 10.0, 8), 8);
         assert!(accumulator > 0.0);
+    }
+
+    #[test]
+    fn breakpoint_state_changes_when_state_differs() {
+        assert!(!breakpoint_state_changed(
+            GameOfLifeState::Dead,
+            GameOfLifeState::Dead
+        ));
+        assert!(breakpoint_state_changed(
+            GameOfLifeState::Dead,
+            GameOfLifeState::Live
+        ));
     }
 
     #[test]
