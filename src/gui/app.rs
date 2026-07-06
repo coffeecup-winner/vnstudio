@@ -21,8 +21,9 @@ use crate::{
         storage::{Chunk, FillNeighborhood},
         types::{CellStateVisuals, CellularAutomataConfig, CellularAutomaton},
         vns_format::{
-            self, LoadedVnsPattern, PatternCells, Stage, apply_game_of_life_cells,
-            apply_jvn29_cells, game_of_life_cells_from_automaton, jvn29_cells_from_automaton,
+            self, Coordinate, DirectedLine, DirectedLineOverlay, LoadedVnsPattern, Overlay,
+            PatternCells, Stage, apply_game_of_life_cells, apply_jvn29_cells,
+            game_of_life_cells_from_automaton, jvn29_cells_from_automaton,
         },
     },
 };
@@ -68,6 +69,10 @@ pub struct VnStudioApp {
     stages: Vec<Stage>,
     new_stage_name: String,
     run_to_stage: Option<RunToStage>,
+    overlays: Vec<OverlayUiState>,
+    active_overlay: Option<usize>,
+    pending_line: Option<PendingDirectedLine>,
+    hovered_line: Option<(usize, usize)>,
 }
 
 pub enum ActiveAutomaton {
@@ -80,6 +85,7 @@ pub struct LoadedPatternForApp {
     pub baseline_cells: PatternCells,
     pub breakpoints: BTreeSet<(isize, isize)>,
     pub stages: Vec<Stage>,
+    pub overlays: Vec<Overlay>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +111,18 @@ enum CompletedFileDialog {
 struct RunToStage {
     target_iteration: u64,
     ignore_breakpoints: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OverlayUiState {
+    overlay: Overlay,
+    expanded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingDirectedLine {
+    overlay_index: usize,
+    points: Vec<Coordinate>,
 }
 
 impl PendingFileDialog {
@@ -242,10 +260,18 @@ impl VnStudioApp {
         mut automaton: ActiveAutomaton,
         breakpoints: BTreeSet<(isize, isize)>,
         stages: Vec<Stage>,
+        overlays: Vec<Overlay>,
         baseline_cells: Option<PatternCells>,
         current_path: Option<PathBuf>,
     ) -> Self {
         let baseline_cells = baseline_cells.unwrap_or_else(|| automaton.to_pattern_cells());
+        let overlays = overlays
+            .into_iter()
+            .map(|overlay| OverlayUiState {
+                overlay,
+                expanded: false,
+            })
+            .collect();
         Self {
             automaton,
             baseline_cells,
@@ -274,6 +300,10 @@ impl VnStudioApp {
             stages,
             new_stage_name: String::new(),
             run_to_stage: None,
+            overlays,
+            active_overlay: None,
+            pending_line: None,
+            hovered_line: None,
         }
     }
 
@@ -299,11 +329,19 @@ impl VnStudioApp {
                     baseline_cells,
                     breakpoints,
                     stages,
+                    overlays,
                 } = loaded;
                 self.automaton = automaton;
                 self.baseline_cells = baseline_cells;
                 self.breakpoints = breakpoints;
                 self.stages = stages;
+                self.overlays = overlays
+                    .into_iter()
+                    .map(|overlay| OverlayUiState {
+                        overlay,
+                        expanded: false,
+                    })
+                    .collect();
                 self.current_path = Some(path.clone());
                 self.after_pattern_replaced(ctx);
                 self.status_message = Some(format!("Loaded {}", path.display()));
@@ -337,6 +375,7 @@ impl VnStudioApp {
             self.baseline_cells.clone(),
             &self.breakpoints,
             &self.stages,
+            &self.serializable_overlays(),
         ) {
             Ok(()) => {
                 self.current_path = Some(path.clone());
@@ -404,12 +443,16 @@ impl VnStudioApp {
         self.is_running = false;
         self.run_to_stage = None;
         self.last_breakpoint_hit = None;
+        self.active_overlay = None;
+        self.pending_line = None;
+        self.hovered_line = None;
         self.reset_timing(ctx.input(|input| input.time));
         self.publish_title(ctx);
         ctx.request_repaint();
     }
 
     fn draw_tools(&mut self, ui: &mut Ui) {
+        self.hovered_line = None;
         ui.heading("VNStudio");
         ui.label(self.automaton.name());
         ui.separator();
@@ -512,6 +555,10 @@ impl VnStudioApp {
             .default_open(true)
             .show(ui, |ui| self.draw_stages(ui));
 
+        egui::CollapsingHeader::new("Overlays")
+            .default_open(true)
+            .show(ui, |ui| self.draw_overlays(ui));
+
         egui::CollapsingHeader::new("Breakpoints")
             .default_open(true)
             .show(ui, |ui| {
@@ -546,6 +593,129 @@ impl VnStudioApp {
             .show(ui, |ui| {
                 ui.label("No cell selected");
             });
+    }
+
+    fn draw_overlays(&mut self, ui: &mut Ui) {
+        if ui.button("Add Directed Lines Overlay").clicked() {
+            self.add_directed_lines_overlay();
+        }
+        ui.separator();
+
+        if self.overlays.is_empty() {
+            ui.label("No overlays");
+            return;
+        }
+
+        let mut active_overlay = self.active_overlay;
+        for overlay_index in 0..self.overlays.len() {
+            let mut delete_overlay = false;
+            let is_active = active_overlay == Some(overlay_index);
+            let response = ui.horizontal(|ui| {
+                let overlay = &mut self.overlays[overlay_index];
+                let Overlay::DirectedLines(directed_lines) = &mut overlay.overlay;
+
+                ui.checkbox(&mut directed_lines.visible, "");
+                let arrow = if overlay.expanded { "v" } else { ">" };
+                if ui.small_button(arrow).clicked() {
+                    overlay.expanded = !overlay.expanded;
+                }
+                ui.text_edit_singleline(&mut directed_lines.name);
+                if ui.selectable_label(is_active, "Draw").clicked() {
+                    if is_active {
+                        active_overlay = None;
+                    } else {
+                        active_overlay = Some(overlay_index);
+                    }
+                    self.pending_line = None;
+                }
+                if ui.button("Delete").clicked() {
+                    delete_overlay = true;
+                }
+            });
+            response.response.on_hover_text("Directed lines overlay");
+
+            if delete_overlay {
+                self.overlays.remove(overlay_index);
+                if active_overlay == Some(overlay_index) {
+                    active_overlay = None;
+                    self.pending_line = None;
+                } else if let Some(active) = active_overlay
+                    && active > overlay_index
+                {
+                    active_overlay = Some(active - 1);
+                }
+                self.active_overlay = active_overlay.filter(|&index| index < self.overlays.len());
+                self.status_message = Some("Deleted overlay".to_string());
+                return;
+            }
+
+            if self.overlays[overlay_index].expanded {
+                self.draw_overlay_lines(ui, overlay_index);
+            }
+        }
+
+        self.active_overlay = active_overlay.filter(|&index| index < self.overlays.len());
+    }
+
+    fn draw_overlay_lines(&mut self, ui: &mut Ui, overlay_index: usize) {
+        let Overlay::DirectedLines(overlay) = &mut self.overlays[overlay_index].overlay;
+        if overlay.lines.is_empty() {
+            ui.indent(("overlay-empty", overlay_index), |ui| {
+                ui.label("No lines");
+            });
+            return;
+        }
+
+        let mut delete_line = None;
+        ui.indent(("overlay-lines", overlay_index), |ui| {
+            for line_index in 0..overlay.lines.len() {
+                let response = ui.horizontal(|ui| {
+                    let line = &mut overlay.lines[line_index];
+                    ui.checkbox(&mut line.visible, "");
+                    ui.text_edit_singleline(&mut line.name);
+                    if ui.button("Delete").clicked() {
+                        delete_line = Some(line_index);
+                    }
+                });
+                if response.response.hovered() {
+                    self.hovered_line = Some((overlay_index, line_index));
+                }
+            }
+        });
+
+        if let Some(line_index) = delete_line {
+            overlay.lines.remove(line_index);
+            self.status_message = Some("Deleted overlay line".to_string());
+        }
+    }
+
+    fn add_directed_lines_overlay(&mut self) {
+        let index = self.overlays.len();
+        self.overlays.push(OverlayUiState {
+            overlay: Overlay::DirectedLines(DirectedLineOverlay {
+                name: format!("Overlay {}", index + 1),
+                visible: true,
+                lines: Vec::new(),
+            }),
+            expanded: true,
+        });
+        self.active_overlay = Some(index);
+        self.pending_line = None;
+        self.status_message = Some("Added directed lines overlay".to_string());
+    }
+
+    fn serializable_overlays(&self) -> Vec<Overlay> {
+        self.overlays
+            .iter()
+            .map(|overlay| overlay.overlay.clone())
+            .collect()
+    }
+
+    fn next_line_name(&self, overlay_index: usize) -> String {
+        let line_count = match &self.overlays[overlay_index].overlay {
+            Overlay::DirectedLines(overlay) => overlay.lines.len(),
+        };
+        format!("Line {}", line_count + 1)
     }
 
     fn draw_stages(&mut self, ui: &mut Ui) {
@@ -850,15 +1020,86 @@ impl VnStudioApp {
             ctx.request_repaint();
         }
 
+        if response.clicked_by(PointerButton::Primary)
+            && let Some(pointer_pos) = response.interact_pointer_pos()
+        {
+            self.handle_overlay_primary_click(rect, pointer_pos);
+        }
+
         if response.clicked_by(PointerButton::Secondary)
             && let Some(pointer_pos) = response.interact_pointer_pos()
         {
-            self.toggle_breakpoint_at(rect, pointer_pos);
+            if self.active_overlay.is_some() {
+                self.finish_pending_line();
+            } else {
+                self.toggle_breakpoint_at(rect, pointer_pos);
+            }
         }
 
         self.paint_cells(rect, &painter, ctx);
         self.paint_grid(rect, &painter);
+        self.paint_overlays(rect, &painter);
         self.paint_breakpoints(rect, &painter);
+    }
+
+    fn handle_overlay_primary_click(&mut self, rect: Rect, pointer_pos: Pos2) {
+        let Some(overlay_index) = self.active_overlay else {
+            return;
+        };
+        if overlay_index >= self.overlays.len() {
+            self.active_overlay = None;
+            self.pending_line = None;
+            return;
+        }
+
+        let cell = pointer_cell(rect, self.pan, self.zoom, pointer_pos);
+        match &mut self.pending_line {
+            Some(line) if line.overlay_index == overlay_index => {
+                let Some(&last) = line.points.last() else {
+                    line.points.push(cell);
+                    return;
+                };
+                if last == cell {
+                    return;
+                }
+                if !vns_format::coordinates_are_axis_aligned(last, cell) {
+                    self.status_message =
+                        Some("Overlay line segments must be horizontal or vertical".to_string());
+                    return;
+                }
+                line.points.push(cell);
+            }
+            _ => {
+                self.pending_line = Some(PendingDirectedLine {
+                    overlay_index,
+                    points: vec![cell],
+                });
+                self.status_message = Some("Started overlay line".to_string());
+            }
+        }
+    }
+
+    fn finish_pending_line(&mut self) {
+        let Some(line) = self.pending_line.take() else {
+            return;
+        };
+        if line.points.len() < 2 {
+            self.status_message = Some("Discarded empty overlay line".to_string());
+            return;
+        }
+        if line.overlay_index >= self.overlays.len() {
+            self.status_message = Some("Discarded overlay line for missing overlay".to_string());
+            return;
+        }
+
+        let name = self.next_line_name(line.overlay_index);
+        let Overlay::DirectedLines(overlay) = &mut self.overlays[line.overlay_index].overlay;
+        overlay.lines.push(DirectedLine {
+            name,
+            visible: true,
+            points: line.points,
+        });
+        self.status_message = Some("Added overlay line".to_string());
     }
 
     fn toggle_breakpoint_at(&mut self, rect: Rect, pointer_pos: Pos2) {
@@ -998,6 +1239,33 @@ impl VnStudioApp {
         }
     }
 
+    fn paint_overlays(&self, rect: Rect, painter: &egui::Painter) {
+        if self.zoom <= PIXEL_RENDERING_THRESHOLD {
+            return;
+        }
+
+        for (overlay_index, overlay) in self.overlays.iter().enumerate() {
+            match &overlay.overlay {
+                Overlay::DirectedLines(overlay) => {
+                    if !overlay.visible {
+                        continue;
+                    }
+                    for (line_index, line) in overlay.lines.iter().enumerate() {
+                        if !line.visible {
+                            continue;
+                        }
+                        let highlighted = self.hovered_line == Some((overlay_index, line_index));
+                        paint_directed_line(rect, self.pan, self.zoom, painter, line, highlighted);
+                    }
+                }
+            }
+        }
+
+        if let Some(line) = &self.pending_line {
+            paint_pending_directed_line(rect, self.pan, self.zoom, painter, &line.points);
+        }
+    }
+
     fn paint_breakpoints(&self, rect: Rect, painter: &egui::Painter) {
         let visible = visible_cell_range(rect, self.pan, self.zoom);
         let stroke = Stroke::new(2.0, Color32::from_rgb(220, 20, 60));
@@ -1086,11 +1354,13 @@ pub fn load_pattern_from_path(path: &Path) -> Result<LoadedPatternForApp, Box<dy
         let baseline_cells = loaded.cells.clone();
         let breakpoints = loaded.breakpoints.clone();
         let stages = loaded.stages.clone();
+        let overlays = loaded.overlays.clone();
         return Ok(LoadedPatternForApp {
             automaton: ActiveAutomaton::from_loaded_vns(loaded)?,
             baseline_cells,
             breakpoints,
             stages,
+            overlays,
         });
     }
 
@@ -1106,6 +1376,7 @@ pub fn load_pattern_from_path(path: &Path) -> Result<LoadedPatternForApp, Box<dy
         baseline_cells,
         breakpoints: BTreeSet::new(),
         stages: Vec::new(),
+        overlays: Vec::new(),
     })
 }
 
@@ -1154,6 +1425,136 @@ fn screen_to_world(rect: Rect, pan: Vec2, zoom: f32, point: Pos2) -> Pos2 {
 
 fn world_to_screen(rect: Rect, pan: Vec2, zoom: f32, x: f32, y: f32) -> Pos2 {
     rect.center() + pan + Vec2::new(x * zoom, y * zoom)
+}
+
+fn pointer_cell(rect: Rect, pan: Vec2, zoom: f32, point: Pos2) -> Coordinate {
+    let world = screen_to_world(rect, pan, zoom, point);
+    Coordinate {
+        x: world.x.floor() as isize,
+        y: world.y.floor() as isize,
+    }
+}
+
+fn cell_center_screen(rect: Rect, pan: Vec2, zoom: f32, cell: Coordinate) -> Pos2 {
+    world_to_screen(rect, pan, zoom, cell.x as f32 + 0.5, cell.y as f32 + 0.5)
+}
+
+fn paint_directed_line(
+    rect: Rect,
+    pan: Vec2,
+    zoom: f32,
+    painter: &egui::Painter,
+    line: &DirectedLine,
+    highlighted: bool,
+) {
+    let color = if highlighted {
+        Color32::from_rgb(255, 140, 0)
+    } else {
+        Color32::from_rgb(30, 120, 220)
+    };
+    let stroke = Stroke::new(if highlighted { 3.0 } else { 2.0 }, color);
+    paint_directed_points(rect, pan, zoom, painter, &line.points, stroke, color);
+}
+
+fn paint_pending_directed_line(
+    rect: Rect,
+    pan: Vec2,
+    zoom: f32,
+    painter: &egui::Painter,
+    points: &[Coordinate],
+) {
+    let color = Color32::from_rgba_premultiplied(30, 120, 220, 150);
+    if points.len() == 1 {
+        painter.circle_filled(
+            cell_center_screen(rect, pan, zoom, points[0]),
+            (zoom * 0.12).clamp(3.0, 8.0),
+            color,
+        );
+    }
+    let stroke = Stroke::new(2.0, color);
+    paint_directed_points(rect, pan, zoom, painter, points, stroke, color);
+}
+
+fn paint_directed_points(
+    rect: Rect,
+    pan: Vec2,
+    zoom: f32,
+    painter: &egui::Painter,
+    points: &[Coordinate],
+    stroke: Stroke,
+    color: Color32,
+) {
+    for pair in points.windows(2) {
+        if !vns_format::coordinates_are_axis_aligned(pair[0], pair[1]) || pair[0] == pair[1] {
+            continue;
+        }
+
+        painter.line_segment(
+            [
+                cell_center_screen(rect, pan, zoom, pair[0]),
+                cell_center_screen(rect, pan, zoom, pair[1]),
+            ],
+            stroke,
+        );
+
+        for (border, direction) in directed_segment_border_arrows(pair[0], pair[1]) {
+            paint_arrow_triangle(rect, pan, zoom, painter, border, direction, color);
+        }
+    }
+}
+
+fn directed_segment_border_arrows(
+    start: Coordinate,
+    end: Coordinate,
+) -> Vec<((f32, f32), (f32, f32))> {
+    let mut arrows = Vec::new();
+    if start.x == end.x {
+        let step = (end.y - start.y).signum();
+        if step == 0 {
+            return arrows;
+        }
+        let mut y = start.y;
+        while y != end.y {
+            let border_y = if step > 0 { y + 1 } else { y };
+            arrows.push(((start.x as f32 + 0.5, border_y as f32), (0.0, step as f32)));
+            y += step;
+        }
+    } else if start.y == end.y {
+        let step = (end.x - start.x).signum();
+        if step == 0 {
+            return arrows;
+        }
+        let mut x = start.x;
+        while x != end.x {
+            let border_x = if step > 0 { x + 1 } else { x };
+            arrows.push(((border_x as f32, start.y as f32 + 0.5), (step as f32, 0.0)));
+            x += step;
+        }
+    }
+    arrows
+}
+
+fn paint_arrow_triangle(
+    rect: Rect,
+    pan: Vec2,
+    zoom: f32,
+    painter: &egui::Painter,
+    border: (f32, f32),
+    direction: (f32, f32),
+    color: Color32,
+) {
+    let center = world_to_screen(rect, pan, zoom, border.0, border.1);
+    let direction = Vec2::new(direction.0, direction.1);
+    let perpendicular = Vec2::new(-direction.y, direction.x);
+    let size = (zoom * 0.18).clamp(4.0, 10.0);
+    let tip = center + direction * size;
+    let base = center - direction * size * 0.65;
+    let points = vec![
+        tip,
+        base + perpendicular * size * 0.55,
+        base - perpendicular * size * 0.55,
+    ];
+    painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 fn fixed_steps_due(
@@ -1260,6 +1661,35 @@ mod tests {
         let world = screen_to_world(rect, pan, zoom, screen);
 
         assert_eq!(world, Pos2::new(-3.0, 5.0));
+    }
+
+    #[test]
+    fn pointer_cell_floors_world_coordinates() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
+        let pan = Vec2::ZERO;
+        let zoom = 20.0;
+        let point = world_to_screen(rect, pan, zoom, -1.2, 3.9);
+
+        assert_eq!(
+            pointer_cell(rect, pan, zoom, point),
+            Coordinate { x: -2, y: 3 }
+        );
+    }
+
+    #[test]
+    fn directed_segment_arrows_follow_each_cell_border() {
+        assert_eq!(
+            directed_segment_border_arrows(Coordinate { x: 0, y: 0 }, Coordinate { x: 3, y: 0 }),
+            vec![
+                ((1.0, 0.5), (1.0, 0.0)),
+                ((2.0, 0.5), (1.0, 0.0)),
+                ((3.0, 0.5), (1.0, 0.0)),
+            ]
+        );
+        assert_eq!(
+            directed_segment_border_arrows(Coordinate { x: 2, y: 2 }, Coordinate { x: 2, y: 0 }),
+            vec![((2.5, 2.0), (0.0, -1.0)), ((2.5, 1.0), (0.0, -1.0)),]
+        );
     }
 
     #[test]

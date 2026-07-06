@@ -26,6 +26,7 @@ fn run_app(
     automaton: ActiveAutomaton,
     breakpoints: BTreeSet<(isize, isize)>,
     stages: Vec<core::vns_format::Stage>,
+    overlays: Vec<core::vns_format::Overlay>,
     baseline_cells: Option<core::vns_format::PatternCells>,
     current_path: Option<PathBuf>,
 ) -> eframe::Result<()> {
@@ -43,6 +44,7 @@ fn run_app(
                 automaton,
                 breakpoints,
                 stages,
+                overlays,
                 baseline_cells,
                 current_path,
             )))
@@ -103,6 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             baseline_cells,
             breakpoints,
             stages,
+            overlays,
         } = load_pattern_from_path(&path)?;
 
         if let Some(arg) = std::env::args().nth(2)
@@ -119,6 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             automaton,
             breakpoints,
             stages,
+            overlays,
             Some(baseline_cells),
             Some(path),
         )?;
@@ -128,6 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         run_app(
             ActiveAutomaton::GameOfLife(automaton),
             BTreeSet::new(),
+            Vec::new(),
             Vec::new(),
             None,
             None,

@@ -55,12 +55,34 @@ pub struct LoadedVnsPattern {
     pub cells: PatternCells,
     pub breakpoints: BTreeSet<(isize, isize)>,
     pub stages: Vec<Stage>,
+    pub overlays: Vec<Overlay>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stage {
     pub name: String,
     pub iteration: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Overlay {
+    #[serde(rename = "directed_lines")]
+    DirectedLines(DirectedLineOverlay),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedLineOverlay {
+    pub name: String,
+    pub visible: bool,
+    pub lines: Vec<DirectedLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedLine {
+    pub name: String,
+    pub visible: bool,
+    pub points: Vec<Coordinate>,
 }
 
 #[derive(Debug)]
@@ -126,10 +148,10 @@ struct RlePattern {
     lines: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Coordinate {
-    x: isize,
-    y: isize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Coordinate {
+    pub x: isize,
+    pub y: isize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -144,6 +166,8 @@ struct ExtraState {
     breakpoints: Vec<Coordinate>,
     #[serde(default)]
     stages: Vec<Stage>,
+    #[serde(default)]
+    overlays: Vec<Overlay>,
 }
 
 pub fn load_vns(path: impl AsRef<Path>) -> Result<LoadedVnsPattern, VnsError> {
@@ -155,8 +179,9 @@ pub fn save_vns(
     cells: PatternCells,
     breakpoints: &BTreeSet<(isize, isize)>,
     stages: &[Stage],
+    overlays: &[Overlay],
 ) -> Result<(), VnsError> {
-    fs::write(path, serialize_vns(cells, breakpoints, stages)?)?;
+    fs::write(path, serialize_vns(cells, breakpoints, stages, overlays)?)?;
     Ok(())
 }
 
@@ -188,6 +213,8 @@ pub fn parse_vns(input: &str) -> Result<LoadedVnsPattern, VnsError> {
         .map(|coordinate| (coordinate.x, coordinate.y))
         .collect();
     let stages = document.extra.stages;
+    let overlays = document.extra.overlays;
+    validate_overlays(&overlays)?;
 
     let cells = match document.ruleset.as_str() {
         "jvn29" => PatternCells::JvN29(parse_jvn29_rle_pattern(&document.pattern)?),
@@ -205,6 +232,7 @@ pub fn parse_vns(input: &str) -> Result<LoadedVnsPattern, VnsError> {
         cells,
         breakpoints,
         stages,
+        overlays,
     })
 }
 
@@ -212,7 +240,9 @@ pub fn serialize_vns(
     cells: PatternCells,
     breakpoints: &BTreeSet<(isize, isize)>,
     stages: &[Stage],
+    overlays: &[Overlay],
 ) -> Result<String, VnsError> {
+    validate_overlays(overlays)?;
     let ruleset = cells.ruleset();
     let pattern = match cells {
         PatternCells::JvN29(cells) => build_rle_pattern(&cells, jvn29_state_token)?,
@@ -229,10 +259,54 @@ pub fn serialize_vns(
                 .map(|&(x, y)| Coordinate { x, y })
                 .collect(),
             stages: stages.to_vec(),
+            overlays: overlays.to_vec(),
         },
     };
 
     Ok(serde_json::to_string_pretty(&document)?)
+}
+
+fn validate_overlays(overlays: &[Overlay]) -> Result<(), VnsError> {
+    for overlay in overlays {
+        match overlay {
+            Overlay::DirectedLines(overlay) => {
+                for line in &overlay.lines {
+                    validate_directed_line(line)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_directed_line(line: &DirectedLine) -> Result<(), VnsError> {
+    if line.points.len() < 2 {
+        return Err(VnsError::parse(format!(
+            "directed line {:?} must have at least two points",
+            line.name
+        )));
+    }
+
+    for pair in line.points.windows(2) {
+        if !coordinates_are_axis_aligned(pair[0], pair[1]) {
+            return Err(VnsError::parse(format!(
+                "directed line {:?} contains a non-orthogonal segment",
+                line.name
+            )));
+        }
+        if pair[0] == pair[1] {
+            return Err(VnsError::parse(format!(
+                "directed line {:?} contains a zero-length segment",
+                line.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn coordinates_are_axis_aligned(start: Coordinate, end: Coordinate) -> bool {
+    start.x == end.x || start.y == end.y
 }
 
 pub fn jvn29_cells_from_automaton(automaton: &mut VonNeumann) -> Vec<Cell<VonNeumannState>> {
@@ -617,11 +691,25 @@ mod tests {
             name: "Blinker".to_string(),
             iteration: 1,
         }];
+        let overlays = vec![Overlay::DirectedLines(DirectedLineOverlay {
+            name: "Wires".to_string(),
+            visible: true,
+            lines: vec![DirectedLine {
+                name: "Line 1".to_string(),
+                visible: false,
+                points: vec![
+                    Coordinate { x: -1, y: 2 },
+                    Coordinate { x: 2, y: 2 },
+                    Coordinate { x: 2, y: 4 },
+                ],
+            }],
+        })];
 
         let serialized = serialize_vns(
             PatternCells::GameOfLife(cells.clone()),
             &breakpoints,
             &stages,
+            &overlays,
         )
         .unwrap();
         let loaded = parse_vns(&serialized).unwrap();
@@ -629,8 +717,10 @@ mod tests {
         assert_eq!(loaded.cells, PatternCells::GameOfLife(cells));
         assert_eq!(loaded.breakpoints, breakpoints);
         assert_eq!(loaded.stages, stages);
+        assert_eq!(loaded.overlays, overlays);
         assert!(serialized.contains("\"encoding\": \"rle\""));
         assert!(serialized.contains("\"stages\""));
+        assert!(serialized.contains("\"kind\": \"directed_lines\""));
         assert!(serialized.contains("3o!"));
     }
 
@@ -649,8 +739,13 @@ mod tests {
             },
         ];
 
-        let serialized =
-            serialize_vns(PatternCells::JvN29(cells.clone()), &BTreeSet::new(), &[]).unwrap();
+        let serialized = serialize_vns(
+            PatternCells::JvN29(cells.clone()),
+            &BTreeSet::new(),
+            &[],
+            &[],
+        )
+        .unwrap();
         let loaded = parse_vns(&serialized).unwrap();
 
         assert_eq!(loaded.cells, PatternCells::JvN29(cells));
@@ -658,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_stages_default_to_empty() {
+    fn missing_extra_items_default_to_empty() {
         let input = r#"{
             "format": "vnstudio.pattern",
             "version": 1,
@@ -677,6 +772,39 @@ mod tests {
         let loaded = parse_vns(input).unwrap();
 
         assert!(loaded.stages.is_empty());
+        assert!(loaded.overlays.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_orthogonal_directed_line_segments() {
+        let input = r#"{
+            "format": "vnstudio.pattern",
+            "version": 1,
+            "ruleset": "game_of_life",
+            "pattern": {
+                "encoding": "rle",
+                "origin": { "x": 0, "y": 0 },
+                "size": { "width": 1, "height": 1 },
+                "lines": ["o!"]
+            },
+            "extra": {
+                "overlays": [{
+                    "kind": "directed_lines",
+                    "name": "Bad",
+                    "visible": true,
+                    "lines": [{
+                        "name": "Diagonal",
+                        "visible": true,
+                        "points": [
+                            { "x": 0, "y": 0 },
+                            { "x": 1, "y": 1 }
+                        ]
+                    }]
+                }]
+            }
+        }"#;
+
+        assert!(parse_vns(input).is_err());
     }
 
     #[test]
