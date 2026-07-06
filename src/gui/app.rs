@@ -9,8 +9,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Color32, ColorImage, Context, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, Vec2,
+    self, Color32, ColorImage, Context, PointerButton, Pos2, Rect, RichText, Sense, Stroke,
+    TextureHandle, TextureOptions, Ui, Vec2,
 };
 
 use crate::{
@@ -21,8 +21,8 @@ use crate::{
         storage::{Chunk, FillNeighborhood},
         types::{CellStateVisuals, CellularAutomataConfig, CellularAutomaton},
         vns_format::{
-            self, LoadedVnsPattern, PatternCells, apply_game_of_life_cells, apply_jvn29_cells,
-            game_of_life_cells_from_automaton, jvn29_cells_from_automaton,
+            self, LoadedVnsPattern, PatternCells, Stage, apply_game_of_life_cells,
+            apply_jvn29_cells, game_of_life_cells_from_automaton, jvn29_cells_from_automaton,
         },
     },
 };
@@ -35,12 +35,14 @@ const MAX_CELL_SIZE: f32 = 160.0;
 const PIXEL_RENDERING_THRESHOLD: f32 = 8.0;
 const LOW_ZOOM_SCROLL_THRESHOLD: f32 = 60.0;
 const FIXED_SPEED_MAX_STEPS_PER_FRAME: u32 = 8;
+const RUN_TO_STAGE_MAX_STEPS_PER_FRAME: u32 = 256;
 const REALTIME_FRAME_BUDGET: Duration = Duration::from_millis(12);
 const REPAINT_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const BASE_TITLE: &str = "VNStudio";
 
 pub struct VnStudioApp {
     automaton: ActiveAutomaton,
+    baseline_cells: PatternCells,
     zoom: f32,
     pan: Vec2,
     glyphs: HashMap<u8, SvgGlyph>,
@@ -61,11 +63,21 @@ pub struct VnStudioApp {
     status_message: Option<String>,
     current_path: Option<PathBuf>,
     pending_file_dialog: Option<PendingFileDialog>,
+    stages: Vec<Stage>,
+    new_stage_name: String,
+    run_to_stage: Option<RunToStage>,
 }
 
 pub enum ActiveAutomaton {
     JvN29(VonNeumann),
     GameOfLife(GameOfLife),
+}
+
+pub struct LoadedPatternForApp {
+    pub automaton: ActiveAutomaton,
+    pub baseline_cells: PatternCells,
+    pub breakpoints: BTreeSet<(isize, isize)>,
+    pub stages: Vec<Stage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +97,12 @@ enum PendingFileDialog {
 enum CompletedFileDialog {
     Load(Option<PathBuf>),
     Save(Option<PathBuf>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RunToStage {
+    target_iteration: u64,
+    ignore_breakpoints: bool,
 }
 
 impl PendingFileDialog {
@@ -116,7 +134,11 @@ impl ActiveAutomaton {
     }
 
     pub fn from_loaded_vns(pattern: LoadedVnsPattern) -> Result<Self, Box<dyn Error>> {
-        match pattern.cells {
+        Self::from_pattern_cells(pattern.cells)
+    }
+
+    pub fn from_pattern_cells(cells: PatternCells) -> Result<Self, Box<dyn Error>> {
+        match cells {
             PatternCells::JvN29(cells) => {
                 let mut automaton = match Self::new_jvn29()? {
                     Self::JvN29(automaton) => automaton,
@@ -202,12 +224,16 @@ impl SimulationSpeed {
 impl VnStudioApp {
     pub fn new(
         _creation_context: &eframe::CreationContext<'_>,
-        automaton: ActiveAutomaton,
+        mut automaton: ActiveAutomaton,
         breakpoints: BTreeSet<(isize, isize)>,
+        stages: Vec<Stage>,
+        baseline_cells: Option<PatternCells>,
         current_path: Option<PathBuf>,
     ) -> Self {
+        let baseline_cells = baseline_cells.unwrap_or_else(|| automaton.to_pattern_cells());
         Self {
             automaton,
+            baseline_cells,
             zoom: INITIAL_CELL_SIZE,
             pan: Vec2::ZERO,
             glyphs: HashMap::new(),
@@ -228,6 +254,9 @@ impl VnStudioApp {
             status_message: None,
             current_path,
             pending_file_dialog: None,
+            stages,
+            new_stage_name: String::new(),
+            run_to_stage: None,
         }
     }
 
@@ -247,9 +276,17 @@ impl VnStudioApp {
 
     fn finish_load_dialog(&mut self, path: PathBuf, ctx: &Context) {
         match load_pattern_from_path(&path) {
-            Ok((automaton, breakpoints)) => {
+            Ok(loaded) => {
+                let LoadedPatternForApp {
+                    automaton,
+                    baseline_cells,
+                    breakpoints,
+                    stages,
+                } = loaded;
                 self.automaton = automaton;
+                self.baseline_cells = baseline_cells;
                 self.breakpoints = breakpoints;
+                self.stages = stages;
                 self.current_path = Some(path.clone());
                 self.after_pattern_replaced(ctx);
                 self.status_message = Some(format!("Loaded {}", path.display()));
@@ -278,8 +315,12 @@ impl VnStudioApp {
 
     fn finish_save_dialog(&mut self, path: PathBuf) {
         let path = with_vns_extension(path);
-        let pattern = self.automaton.to_pattern_cells();
-        match vns_format::save_vns(&path, pattern, &self.breakpoints) {
+        match vns_format::save_vns(
+            &path,
+            self.baseline_cells.clone(),
+            &self.breakpoints,
+            &self.stages,
+        ) {
             Ok(()) => {
                 self.current_path = Some(path.clone());
                 self.status_message = Some(format!("Saved {}", path.display()));
@@ -344,6 +385,7 @@ impl VnStudioApp {
         self.pixel_texture_generation = u64::MAX;
         self.simulation_generation = 0;
         self.is_running = false;
+        self.run_to_stage = None;
         self.last_breakpoint_hit = None;
         self.reset_timing(ctx.input(|input| input.time));
         self.publish_title(ctx, None);
@@ -410,6 +452,10 @@ impl VnStudioApp {
                 ui.label("No cell selected");
             });
 
+        egui::CollapsingHeader::new("Stages")
+            .default_open(true)
+            .show(ui, |ui| self.draw_stages(ui));
+
         egui::CollapsingHeader::new("Simulation")
             .default_open(true)
             .show(ui, |ui| {
@@ -433,6 +479,17 @@ impl VnStudioApp {
                             self.updates_this_window += 1;
                         }
                     }
+
+                    if ui.button("Reset to 0").clicked() {
+                        match self.reset_to_baseline(ui.ctx()) {
+                            Ok(()) => {
+                                self.status_message = Some("Reset to iteration 0".to_string());
+                            }
+                            Err(error) => {
+                                self.status_message = Some(format!("Reset failed: {error}"));
+                            }
+                        }
+                    }
                 });
 
                 ui.separator();
@@ -453,6 +510,77 @@ impl VnStudioApp {
             });
     }
 
+    fn draw_stages(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.new_stage_name);
+            if ui.button("Add Current").clicked() {
+                self.add_current_stage();
+            }
+        });
+        ui.separator();
+
+        if self.stages.is_empty() {
+            ui.label("No stages");
+            return;
+        }
+
+        let mut stage_indices: Vec<_> = (0..self.stages.len()).collect();
+        stage_indices.sort_by_key(|&index| {
+            (
+                self.stages[index].iteration,
+                self.stages[index].name.to_ascii_lowercase(),
+            )
+        });
+
+        for index in stage_indices {
+            let stage = self.stages[index].clone();
+            let passed = stage.iteration <= self.simulation_generation;
+            ui.horizontal(|ui| {
+                let label = format!("{} @ {}", stage.name, stage.iteration);
+                if passed {
+                    ui.label(RichText::new(label).weak());
+                } else {
+                    ui.label(label);
+                    if ui.button("Play").clicked() {
+                        self.start_run_to_stage(stage.iteration, false);
+                    }
+                    if ui.button("Skip BPs").clicked() {
+                        self.start_run_to_stage(stage.iteration, true);
+                    }
+                }
+            });
+        }
+    }
+
+    fn add_current_stage(&mut self) {
+        let name = self.new_stage_name.trim();
+        if name.is_empty() {
+            self.status_message = Some("Stage name cannot be empty".to_string());
+            return;
+        }
+
+        self.stages.push(Stage {
+            name: name.to_string(),
+            iteration: self.simulation_generation,
+        });
+        self.new_stage_name.clear();
+        self.status_message = Some("Added stage".to_string());
+    }
+
+    fn start_run_to_stage(&mut self, target_iteration: u64, ignore_breakpoints: bool) {
+        if target_iteration <= self.simulation_generation {
+            return;
+        }
+
+        self.is_running = false;
+        self.last_breakpoint_hit = None;
+        self.run_to_stage = Some(RunToStage {
+            target_iteration,
+            ignore_breakpoints,
+        });
+        self.status_message = Some(format!("Running to stage at iteration {target_iteration}"));
+    }
+
     fn reset_timing(&mut self, now: f64) {
         self.step_accumulator = 0.0;
         self.last_update_time = Some(now);
@@ -466,6 +594,13 @@ impl VnStudioApp {
             .last_update_time
             .replace(now)
             .map_or(0.0, |last| (now - last).max(0.0));
+
+        if self.run_to_stage.is_some() {
+            self.update_run_to_stage(now);
+            ctx.request_repaint_after(REPAINT_INTERVAL);
+            self.update_title(ctx, now);
+            return;
+        }
 
         if self.is_running {
             match self.speed {
@@ -494,6 +629,34 @@ impl VnStudioApp {
         self.update_title(ctx, now);
     }
 
+    fn update_run_to_stage(&mut self, now: f64) {
+        let Some(run) = self.run_to_stage else {
+            return;
+        };
+
+        let mut steps = 0;
+        while self.simulation_generation < run.target_iteration
+            && steps < RUN_TO_STAGE_MAX_STEPS_PER_FRAME
+        {
+            let breakpoint_hit = self.step_simulation_checked(!run.ignore_breakpoints);
+            if breakpoint_hit {
+                self.run_to_stage = None;
+                self.pause_after_breakpoint(now);
+                return;
+            }
+            steps += 1;
+        }
+
+        if self.simulation_generation >= run.target_iteration {
+            self.run_to_stage = None;
+            self.reset_timing(now);
+            self.status_message = Some(format!(
+                "Reached stage at iteration {}",
+                run.target_iteration
+            ));
+        }
+    }
+
     fn update_realtime(&mut self) {
         let start = Instant::now();
         let mut steps = 0;
@@ -514,12 +677,20 @@ impl VnStudioApp {
     }
 
     fn step_simulation(&mut self) -> bool {
-        let breakpoint_states_before = self.breakpoint_states();
+        self.step_simulation_checked(true)
+    }
+
+    fn step_simulation_checked(&mut self, check_breakpoints: bool) -> bool {
+        let breakpoint_states_before = check_breakpoints.then(|| self.breakpoint_states());
         self.automaton.evaluate_next();
         self.simulation_generation = self.simulation_generation.wrapping_add(1);
-        self.last_breakpoint_hit =
-            self.first_changed_breakpoint(&breakpoint_states_before, self.simulation_generation);
-        self.last_breakpoint_hit.is_some()
+        if let Some(breakpoint_states_before) = breakpoint_states_before {
+            self.last_breakpoint_hit = self
+                .first_changed_breakpoint(&breakpoint_states_before, self.simulation_generation);
+            self.last_breakpoint_hit.is_some()
+        } else {
+            false
+        }
     }
 
     fn pause_after_breakpoint(&mut self, now: f64) {
@@ -549,6 +720,21 @@ impl VnStudioApp {
                 generation,
             })
         })
+    }
+
+    fn reset_to_baseline(&mut self, ctx: &Context) -> Result<(), Box<dyn Error>> {
+        self.automaton = ActiveAutomaton::from_pattern_cells(self.baseline_cells.clone())?;
+        self.simulation_generation = 0;
+        self.is_running = false;
+        self.run_to_stage = None;
+        self.last_breakpoint_hit = None;
+        self.pixel_texture = None;
+        self.pixel_texture_bounds = None;
+        self.pixel_texture_generation = u64::MAX;
+        self.reset_timing(ctx.input(|input| input.time));
+        self.publish_title(ctx, None);
+        ctx.request_repaint();
+        Ok(())
     }
 
     fn update_title(&mut self, ctx: &Context, now: f64) {
@@ -829,26 +1015,37 @@ fn glyph_for<State: crate::core::types::CellState>(
     glyphs.get(&key)
 }
 
-pub fn load_pattern_from_path(
-    path: &Path,
-) -> Result<(ActiveAutomaton, BTreeSet<(isize, isize)>), Box<dyn Error>> {
+pub fn load_pattern_from_path(path: &Path) -> Result<LoadedPatternForApp, Box<dyn Error>> {
     if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("vns"))
     {
         let loaded = vns_format::load_vns(path)?;
+        let baseline_cells = loaded.cells.clone();
         let breakpoints = loaded.breakpoints.clone();
-        return Ok((ActiveAutomaton::from_loaded_vns(loaded)?, breakpoints));
+        let stages = loaded.stages.clone();
+        return Ok(LoadedPatternForApp {
+            automaton: ActiveAutomaton::from_loaded_vns(loaded)?,
+            baseline_cells,
+            breakpoints,
+            stages,
+        });
     }
 
     let pattern = golly_loader::load_jvn29_rle(path)?;
+    let baseline_cells = PatternCells::JvN29(pattern.cells.clone());
     let mut automaton = match ActiveAutomaton::new_jvn29()? {
         ActiveAutomaton::JvN29(automaton) => automaton,
         ActiveAutomaton::GameOfLife(_) => unreachable!("new_jvn29 must return JvN29"),
     };
     pattern.apply_to(&mut automaton);
-    Ok((ActiveAutomaton::JvN29(automaton), BTreeSet::new()))
+    Ok(LoadedPatternForApp {
+        automaton: ActiveAutomaton::JvN29(automaton),
+        baseline_cells,
+        breakpoints: BTreeSet::new(),
+        stages: Vec::new(),
+    })
 }
 
 fn with_vns_extension(mut path: PathBuf) -> PathBuf {

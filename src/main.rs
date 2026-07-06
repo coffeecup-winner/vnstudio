@@ -4,7 +4,7 @@ mod gui;
 
 use std::{collections::BTreeSet, error::Error, path::PathBuf};
 
-use gui::app::{ActiveAutomaton, VnStudioApp, load_pattern_from_path};
+use gui::app::{ActiveAutomaton, LoadedPatternForApp, VnStudioApp, load_pattern_from_path};
 
 use crate::{
     automata::game_of_life::{GameOfLife, GameOfLifeState},
@@ -25,6 +25,8 @@ fn seed_game_of_life(automaton: &mut GameOfLife) {
 fn run_app(
     automaton: ActiveAutomaton,
     breakpoints: BTreeSet<(isize, isize)>,
+    stages: Vec<core::vns_format::Stage>,
+    baseline_cells: Option<core::vns_format::PatternCells>,
     current_path: Option<PathBuf>,
 ) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -40,6 +42,8 @@ fn run_app(
                 creation_context,
                 automaton,
                 breakpoints,
+                stages,
+                baseline_cells,
                 current_path,
             )))
         }),
@@ -94,7 +98,12 @@ where
 fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = std::env::args().nth(1) {
         let path = PathBuf::from(path);
-        let (automaton, breakpoints) = load_pattern_from_path(&path)?;
+        let LoadedPatternForApp {
+            automaton,
+            baseline_cells,
+            breakpoints,
+            stages,
+        } = load_pattern_from_path(&path)?;
 
         if let Some(arg) = std::env::args().nth(2)
             && arg == "--bench"
@@ -106,13 +115,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
 
-        run_app(automaton, breakpoints, Some(path))?;
+        run_app(
+            automaton,
+            breakpoints,
+            stages,
+            Some(baseline_cells),
+            Some(path),
+        )?;
     } else {
         let mut automaton = GameOfLife::new();
         seed_game_of_life(&mut automaton);
         run_app(
             ActiveAutomaton::GameOfLife(automaton),
             BTreeSet::new(),
+            Vec::new(),
+            None,
             None,
         )?;
     }

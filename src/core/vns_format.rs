@@ -54,6 +54,13 @@ impl PatternCells {
 pub struct LoadedVnsPattern {
     pub cells: PatternCells,
     pub breakpoints: BTreeSet<(isize, isize)>,
+    pub stages: Vec<Stage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stage {
+    pub name: String,
+    pub iteration: u64,
 }
 
 #[derive(Debug)]
@@ -135,6 +142,8 @@ struct PatternSize {
 struct ExtraState {
     #[serde(default)]
     breakpoints: Vec<Coordinate>,
+    #[serde(default)]
+    stages: Vec<Stage>,
 }
 
 pub fn load_vns(path: impl AsRef<Path>) -> Result<LoadedVnsPattern, VnsError> {
@@ -145,8 +154,9 @@ pub fn save_vns(
     path: impl AsRef<Path>,
     cells: PatternCells,
     breakpoints: &BTreeSet<(isize, isize)>,
+    stages: &[Stage],
 ) -> Result<(), VnsError> {
-    fs::write(path, serialize_vns(cells, breakpoints)?)?;
+    fs::write(path, serialize_vns(cells, breakpoints, stages)?)?;
     Ok(())
 }
 
@@ -177,6 +187,7 @@ pub fn parse_vns(input: &str) -> Result<LoadedVnsPattern, VnsError> {
         .into_iter()
         .map(|coordinate| (coordinate.x, coordinate.y))
         .collect();
+    let stages = document.extra.stages;
 
     let cells = match document.ruleset.as_str() {
         "jvn29" => PatternCells::JvN29(parse_jvn29_rle_pattern(&document.pattern)?),
@@ -190,12 +201,17 @@ pub fn parse_vns(input: &str) -> Result<LoadedVnsPattern, VnsError> {
         }
     };
 
-    Ok(LoadedVnsPattern { cells, breakpoints })
+    Ok(LoadedVnsPattern {
+        cells,
+        breakpoints,
+        stages,
+    })
 }
 
 pub fn serialize_vns(
     cells: PatternCells,
     breakpoints: &BTreeSet<(isize, isize)>,
+    stages: &[Stage],
 ) -> Result<String, VnsError> {
     let ruleset = cells.ruleset();
     let pattern = match cells {
@@ -212,6 +228,7 @@ pub fn serialize_vns(
                 .iter()
                 .map(|&(x, y)| Coordinate { x, y })
                 .collect(),
+            stages: stages.to_vec(),
         },
     };
 
@@ -596,14 +613,24 @@ mod tests {
             },
         ];
         let breakpoints = BTreeSet::from([(0, 2)]);
+        let stages = vec![Stage {
+            name: "Blinker".to_string(),
+            iteration: 1,
+        }];
 
-        let serialized =
-            serialize_vns(PatternCells::GameOfLife(cells.clone()), &breakpoints).unwrap();
+        let serialized = serialize_vns(
+            PatternCells::GameOfLife(cells.clone()),
+            &breakpoints,
+            &stages,
+        )
+        .unwrap();
         let loaded = parse_vns(&serialized).unwrap();
 
         assert_eq!(loaded.cells, PatternCells::GameOfLife(cells));
         assert_eq!(loaded.breakpoints, breakpoints);
+        assert_eq!(loaded.stages, stages);
         assert!(serialized.contains("\"encoding\": \"rle\""));
+        assert!(serialized.contains("\"stages\""));
         assert!(serialized.contains("3o!"));
     }
 
@@ -623,11 +650,33 @@ mod tests {
         ];
 
         let serialized =
-            serialize_vns(PatternCells::JvN29(cells.clone()), &BTreeSet::new()).unwrap();
+            serialize_vns(PatternCells::JvN29(cells.clone()), &BTreeSet::new(), &[]).unwrap();
         let loaded = parse_vns(&serialized).unwrap();
 
         assert_eq!(loaded.cells, PatternCells::JvN29(cells));
         assert!(serialized.contains("ApD!"));
+    }
+
+    #[test]
+    fn missing_stages_default_to_empty() {
+        let input = r#"{
+            "format": "vnstudio.pattern",
+            "version": 1,
+            "ruleset": "game_of_life",
+            "pattern": {
+                "encoding": "rle",
+                "origin": { "x": 0, "y": 0 },
+                "size": { "width": 1, "height": 1 },
+                "lines": ["o!"]
+            },
+            "extra": {
+                "breakpoints": []
+            }
+        }"#;
+
+        let loaded = parse_vns(input).unwrap();
+
+        assert!(loaded.stages.is_empty());
     }
 
     #[test]
