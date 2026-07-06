@@ -195,28 +195,41 @@ impl ActiveAutomaton {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SimulationSpeed {
-    Normal,
-    Faster,
-    Fast,
+    Fixed(u32),
     Realtime,
 }
 
 impl SimulationSpeed {
     fn label(self) -> &'static str {
         match self {
-            SimulationSpeed::Normal => "Normal (2 UPS)",
-            SimulationSpeed::Faster => "Faster (5 UPS)",
-            SimulationSpeed::Fast => "Fast (10 UPS)",
+            SimulationSpeed::Fixed(4) => "4x",
+            SimulationSpeed::Fixed(16) => "16x",
+            SimulationSpeed::Fixed(64) => "64x",
+            SimulationSpeed::Fixed(_) => "Custom",
             SimulationSpeed::Realtime => "Realtime",
         }
     }
 
     fn fixed_updates_per_second(self) -> Option<f64> {
         match self {
-            SimulationSpeed::Normal => Some(2.0),
-            SimulationSpeed::Faster => Some(5.0),
-            SimulationSpeed::Fast => Some(10.0),
+            SimulationSpeed::Fixed(multiplier) => Some(multiplier as f64),
             SimulationSpeed::Realtime => None,
+        }
+    }
+
+    fn double(self) -> Self {
+        match self {
+            SimulationSpeed::Fixed(multiplier) => {
+                SimulationSpeed::Fixed(multiplier.saturating_mul(2))
+            }
+            SimulationSpeed::Realtime => SimulationSpeed::Realtime,
+        }
+    }
+
+    fn halve(self) -> Self {
+        match self {
+            SimulationSpeed::Fixed(multiplier) => SimulationSpeed::Fixed((multiplier / 2).max(1)),
+            SimulationSpeed::Realtime => SimulationSpeed::Realtime,
         }
     }
 }
@@ -243,7 +256,7 @@ impl VnStudioApp {
             simulation_generation: 0,
             pixel_zoom_scroll_accumulator: 0.0,
             is_running: false,
-            speed: SimulationSpeed::Normal,
+            speed: SimulationSpeed::Fixed(4),
             step_accumulator: 0.0,
             last_update_time: None,
             ups_window_start: 0.0,
@@ -417,45 +430,6 @@ impl VnStudioApp {
         }
         ui.separator();
 
-        egui::CollapsingHeader::new("Breakpoints")
-            .default_open(true)
-            .show(ui, |ui| {
-                if let Some(hit) = &self.last_breakpoint_hit {
-                    ui.label(format!(
-                        "Paused at ({}, {}) on iteration {}: {} -> {}",
-                        hit.x, hit.y, hit.generation, hit.old_state, hit.new_state
-                    ));
-                    ui.separator();
-                }
-
-                if self.breakpoints.is_empty() {
-                    ui.label("No breakpoints");
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{} breakpoint(s)", self.breakpoints.len()));
-                        if ui.button("Clear").clicked() {
-                            self.breakpoints.clear();
-                            self.last_breakpoint_hit = None;
-                        }
-                    });
-                    ui.separator();
-
-                    for &(x, y) in &self.breakpoints {
-                        ui.label(format!("({}, {})", x, y));
-                    }
-                }
-            });
-
-        egui::CollapsingHeader::new("State Inspection")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.label("No cell selected");
-            });
-
-        egui::CollapsingHeader::new("Stages")
-            .default_open(true)
-            .show(ui, |ui| self.draw_stages(ui));
-
         egui::CollapsingHeader::new("Simulation")
             .default_open(true)
             .show(ui, |ui| {
@@ -494,10 +468,31 @@ impl VnStudioApp {
 
                 ui.separator();
 
+                ui.horizontal(|ui| {
+                    let fixed_speed = self.speed.fixed_updates_per_second().is_some();
+                    if ui
+                        .add_enabled(fixed_speed, egui::Button::new("/2"))
+                        .clicked()
+                    {
+                        self.speed = self.speed.halve();
+                        self.reset_timing(ui.ctx().input(|input| input.time));
+                    }
+                    if ui
+                        .add_enabled(fixed_speed, egui::Button::new("*2"))
+                        .clicked()
+                    {
+                        self.speed = self.speed.double();
+                        self.reset_timing(ui.ctx().input(|input| input.time));
+                    }
+                    if let SimulationSpeed::Fixed(multiplier) = self.speed {
+                        ui.label(format!("{multiplier}x"));
+                    }
+                });
+
                 for speed in [
-                    SimulationSpeed::Normal,
-                    SimulationSpeed::Faster,
-                    SimulationSpeed::Fast,
+                    SimulationSpeed::Fixed(4),
+                    SimulationSpeed::Fixed(16),
+                    SimulationSpeed::Fixed(64),
                     SimulationSpeed::Realtime,
                 ] {
                     if ui
@@ -507,6 +502,45 @@ impl VnStudioApp {
                         self.reset_timing(ui.ctx().input(|input| input.time));
                     }
                 }
+            });
+
+        egui::CollapsingHeader::new("Stages")
+            .default_open(true)
+            .show(ui, |ui| self.draw_stages(ui));
+
+        egui::CollapsingHeader::new("Breakpoints")
+            .default_open(true)
+            .show(ui, |ui| {
+                if let Some(hit) = &self.last_breakpoint_hit {
+                    ui.label(format!(
+                        "Paused at ({}, {}) on iteration {}: {} -> {}",
+                        hit.x, hit.y, hit.generation, hit.old_state, hit.new_state
+                    ));
+                    ui.separator();
+                }
+
+                if self.breakpoints.is_empty() {
+                    ui.label("No breakpoints");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} breakpoint(s)", self.breakpoints.len()));
+                        if ui.button("Clear").clicked() {
+                            self.breakpoints.clear();
+                            self.last_breakpoint_hit = None;
+                        }
+                    });
+                    ui.separator();
+
+                    for &(x, y) in &self.breakpoints {
+                        ui.label(format!("({}, {})", x, y));
+                    }
+                }
+            });
+
+        egui::CollapsingHeader::new("State Inspection")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("No cell selected");
             });
     }
 
@@ -532,6 +566,7 @@ impl VnStudioApp {
             )
         });
 
+        let mut delete_index = None;
         for index in stage_indices {
             let stage = self.stages[index].clone();
             let passed = stage.iteration <= self.simulation_generation;
@@ -548,7 +583,15 @@ impl VnStudioApp {
                         self.start_run_to_stage(stage.iteration, true);
                     }
                 }
+                if ui.button("Delete").clicked() {
+                    delete_index = Some(index);
+                }
             });
+        }
+
+        if let Some(index) = delete_index {
+            self.stages.remove(index);
+            self.status_message = Some("Deleted stage".to_string());
         }
     }
 
@@ -1216,6 +1259,26 @@ mod tests {
 
         assert_eq!(fixed_steps_due(&mut accumulator, 10.0, 10.0, 8), 8);
         assert!(accumulator > 0.0);
+    }
+
+    #[test]
+    fn fixed_speed_buttons_step_by_two_within_bounds() {
+        assert_eq!(
+            SimulationSpeed::Fixed(4).double(),
+            SimulationSpeed::Fixed(8)
+        );
+        assert_eq!(SimulationSpeed::Fixed(8).halve(), SimulationSpeed::Fixed(4));
+        assert_eq!(SimulationSpeed::Fixed(4).halve(), SimulationSpeed::Fixed(2));
+        assert_eq!(SimulationSpeed::Fixed(2).halve(), SimulationSpeed::Fixed(1));
+        assert_eq!(
+            SimulationSpeed::Fixed(64).double(),
+            SimulationSpeed::Fixed(128)
+        );
+        assert_eq!(SimulationSpeed::Fixed(1).halve(), SimulationSpeed::Fixed(1));
+        assert_eq!(
+            SimulationSpeed::Realtime.double(),
+            SimulationSpeed::Realtime
+        );
     }
 
     #[test]
