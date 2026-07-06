@@ -57,6 +57,8 @@ pub struct VnStudioApp {
     last_update_time: Option<f64>,
     ups_window_start: f64,
     updates_this_window: u32,
+    current_ups: Option<u32>,
+    current_chunk_count: Option<usize>,
     last_title: Option<String>,
     breakpoints: BTreeSet<(isize, isize)>,
     last_breakpoint_hit: Option<BreakpointHit>,
@@ -261,6 +263,8 @@ impl VnStudioApp {
             last_update_time: None,
             ups_window_start: 0.0,
             updates_this_window: 0,
+            current_ups: None,
+            current_chunk_count: None,
             last_title: None,
             breakpoints,
             last_breakpoint_hit: None,
@@ -401,7 +405,7 @@ impl VnStudioApp {
         self.run_to_stage = None;
         self.last_breakpoint_hit = None;
         self.reset_timing(ctx.input(|input| input.time));
-        self.publish_title(ctx, None);
+        self.publish_title(ctx);
         ctx.request_repaint();
     }
 
@@ -445,7 +449,7 @@ impl VnStudioApp {
                         if breakpoint_hit {
                             self.pause_after_breakpoint(ui.ctx().input(|input| input.time));
                         }
-                        self.publish_title(ui.ctx(), None);
+                        self.publish_title(ui.ctx());
                         if self.last_breakpoint_hit.is_none()
                             && self.is_running
                             && self.speed == SimulationSpeed::Realtime
@@ -578,9 +582,11 @@ impl VnStudioApp {
                     ui.label(label);
                     if ui.button("Play").clicked() {
                         self.start_run_to_stage(stage.iteration, false);
+                        self.reset_timing(ui.ctx().input(|input| input.time));
                     }
                     if ui.button("Skip BPs").clicked() {
                         self.start_run_to_stage(stage.iteration, true);
+                        self.reset_timing(ui.ctx().input(|input| input.time));
                     }
                 }
                 if ui.button("Delete").clicked() {
@@ -629,6 +635,8 @@ impl VnStudioApp {
         self.last_update_time = Some(now);
         self.ups_window_start = now;
         self.updates_this_window = 0;
+        self.current_ups = None;
+        self.current_chunk_count = None;
     }
 
     fn update_simulation(&mut self, ctx: &Context) {
@@ -689,6 +697,7 @@ impl VnStudioApp {
             }
             steps += 1;
         }
+        self.updates_this_window += steps;
 
         if self.simulation_generation >= run.target_iteration {
             self.run_to_stage = None;
@@ -775,31 +784,40 @@ impl VnStudioApp {
         self.pixel_texture_bounds = None;
         self.pixel_texture_generation = u64::MAX;
         self.reset_timing(ctx.input(|input| input.time));
-        self.publish_title(ctx, None);
+        self.publish_title(ctx);
         ctx.request_repaint();
         Ok(())
     }
 
     fn update_title(&mut self, ctx: &Context, now: f64) {
-        if self.is_running && self.speed == SimulationSpeed::Realtime {
+        if (self.is_running && self.speed == SimulationSpeed::Realtime)
+            || self.run_to_stage.is_some()
+        {
             if now - self.ups_window_start >= 1.0 {
                 let elapsed = (now - self.ups_window_start).max(1.0);
                 let ups = (self.updates_this_window as f64 / elapsed).round() as u32;
-                self.publish_title(ctx, Some(ups));
+                self.current_ups = Some(ups);
+                self.current_chunk_count = Some(self.automaton.chunk_count());
                 self.ups_window_start = now;
                 self.updates_this_window = 0;
             }
         } else {
-            self.publish_title(ctx, None);
+            self.current_ups = None;
+            self.current_chunk_count = None;
         }
+
+        self.publish_title(ctx);
     }
 
-    fn publish_title(&mut self, ctx: &Context, ups: Option<u32>) {
-        let ups = ups.map_or_else(|| "N/A".to_string(), |ups| ups.to_string());
+    fn publish_title(&mut self, ctx: &Context) {
+        let ups = self
+            .current_ups
+            .map_or_else(|| "?".to_string(), |ups| ups.to_string());
+        let chunks = self
+            .current_chunk_count
+            .map_or_else(|| "?".to_string(), |chunks| chunks.to_string());
         let iterations = self.simulation_generation;
-        let chunks = self.automaton.chunk_count();
-        let title =
-            format!("{BASE_TITLE} - UPS: {ups} - Iteration: {iterations} - Chunks: {chunks}");
+        let title = format!("{BASE_TITLE} - {ups} UPS ({chunks} chunks), iteration {iterations}");
 
         if self.last_title.as_deref() != Some(&title) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
